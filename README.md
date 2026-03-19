@@ -1,12 +1,28 @@
+<div align="center">
+
 # 🦞 虾BB / ClawBB
 
-**按住 Globe 键，说话，文字出现。就这么简单。**
+### Hold Globe. Speak. Text appears.
 
-**Hold Globe. Speak. Text appears. That's it.**
+**Free, open-source macOS voice-to-text powered by Google Gemini**
 
-Native macOS voice-to-text | Powered by Google Gemini | 280KB | Zero dependencies
+按住 Globe 键，说话，文字自动出现。就这么简单。
 
-https://github.com/dyz2102/clawbb/raw/main/clawbb-intro.mp4
+[![Swift](https://img.shields.io/badge/Swift-6.2-orange?logo=swift&logoColor=white)](https://swift.org)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Binary Size](https://img.shields.io/badge/Size-280KB-blue)]()
+[![Gemini](https://img.shields.io/badge/Powered%20by-Gemini%20API-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
+
+<br>
+
+<img src="clawbb-demo.gif" width="720" alt="ClawBB Demo">
+
+<br>
+
+*中英文混着说，它都能搞定。Mix Chinese and English freely.*
+
+</div>
 
 ---
 
@@ -14,144 +30,153 @@ https://github.com/dyz2102/clawbb/raw/main/clawbb-intro.mp4
 
 Every voice typing tool falls apart when you mix Chinese and English. Siri gives up. Whisper garbles it. Paid tools want $15/month.
 
-ClawBB is the lobster that refuses to let go. Free, open source, and actually good at bilingual transcription.
+ClawBB is the lobster that refuses to let go. 🦞
 
-> 虾BB = 瞎BB ("talking nonsense") — because the best ideas sound crazy until you say them out loud. 🦞
+> **虾BB = 瞎BB** ("talking nonsense") — because the best ideas sound crazy until you say them out loud.
 
 ---
 
 ## Features
 
-| | Feature | Description |
-|---|---|---|
-| 🌐 | **Globe key** | Hold to record, release to transcribe + auto-paste |
-| 🔴 | **Live preview** | See text appear as you speak (Gemini Live API) |
-| 🌏 | **Bilingual** | Chinese + English in the same sentence, no problem |
-| 📋 | **Auto-paste** | Text goes straight to your cursor via Cmd+V |
-| 🦞 | **HUD overlay** | Draggable floating window with wave animation |
-| ⚡ | **280KB** | Pure Swift, no Electron, no Python, no Node |
-| 🆓 | **Free forever** | 250 transcriptions/day on Gemini free tier |
-| 🎵 | **Sound feedback** | Tones for start, stop, done, error |
+<table>
+<tr>
+<td width="50%">
 
-## Quick Install
+**🌐 Globe Key Hotkey**
+Hold to record, release to transcribe. One key does everything.
+
+**🔴 Real-time Preview**
+See text streaming as you speak. Powered by Gemini Live API.
+
+**🌏 Truly Bilingual**
+"帮我 schedule a meeting" → works perfectly. No language switching needed.
+
+</td>
+<td width="50%">
+
+**📋 Auto-Paste**
+Text appears at your cursor instantly. No Cmd+V needed.
+
+**⚡ 280KB Binary**
+Pure Swift. No Electron. No Python. No Node. Just works.
+
+**🆓 Free Forever**
+250 transcriptions/day on Google's free tier. No account needed.
+
+</td>
+</tr>
+</table>
+
+**Bonus:** Floating HUD with lobster-mic branding, wave animations, and a "BB!" that pops out when transcription succeeds. 🦞
+
+---
+
+## Install
 
 ```bash
 git clone https://github.com/dyz2102/clawbb.git
 cd clawbb && bash install.sh
 ```
 
-## Build from Source
-
-Requires: macOS 14+, Apple Silicon, Xcode Command Line Tools.
+<details>
+<summary><b>Build from source</b></summary>
 
 ```bash
-xcode-select --install  # if needed
+xcode-select --install  # Xcode CLT if needed
 cd clawbb/native && bash build.sh
 open /Applications/XiaBB.app
 ```
 
-## Setup (3 steps)
+Requires macOS 14+, Apple Silicon.
 
-### 1. Gemini API Key (free)
+</details>
 
-Get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), then:
+---
 
-```bash
-echo 'YOUR_KEY' > .api-key
-```
+## Setup
 
-Or set `GEMINI_API_KEY` env var. Or configure via the menu bar.
+| Step | What to do |
+|------|-----------|
+| **1. API Key** | Free from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → save to `.api-key` or set `GEMINI_API_KEY` |
+| **2. Accessibility** | System Settings → Privacy → Accessibility → enable **Terminal.app** |
+| **3. Microphone** | System prompts on first use → click Allow |
 
-### 2. Accessibility Permission
-
-ClawBB detects the Globe key via `CGEventTap`, which requires Accessibility permission.
-
-**System Settings > Privacy & Security > Accessibility** — add **Terminal.app**.
-
-ClawBB auto-relaunches through Terminal to inherit this permission (the window minimizes automatically).
-
-### 3. Microphone
-
-System will prompt on first recording. Click Allow.
+---
 
 ## Usage
 
-| Action | What happens |
-|--------|-------------|
-| **Hold 🌐 Globe** | Recording starts, HUD appears with live preview |
-| **Release 🌐 Globe** | Transcription finalizes, text pastes at cursor |
-| **Click HUD** | Copy last result to clipboard |
+| Action | Result |
+|--------|--------|
+| **Hold 🌐 Globe** | 🔴 Recording starts, HUD shows live preview |
+| **Release 🌐 Globe** | Text finalizes → copies → pastes at cursor |
+| **Tap < 2s** | Ignored (no accidental triggers) |
+| **Click HUD** | Copy last result |
 | **Drag HUD** | Move it anywhere |
-| **Tap < 2s** | Ignored (prevents accidental triggers) |
-
-Mix languages freely. The model handles punctuation. Simplified Chinese output.
-
-## How It Works
-
-```
-Hold Globe ─── AVAudioEngine (16kHz mono) ──┬──> Gemini Live WebSocket
-                                             │   (real-time preview in HUD)
-                                             │
-Release    ─── WAV encode ──────────────────>└──> Gemini REST API
-                                                  (final transcription)
-                                                       │
-                                              clipboard + Cmd+V paste
-```
-
-## Config
-
-`~/.config.json` in the install directory:
-
-| Key | Default | What it does |
-|-----|---------|-------------|
-| `lang` | `"zh"` | UI language (`"en"` or `"zh"`) |
-| `min_duration` | `2.0` | Minimum recording seconds |
-| `hud_x` / `hud_y` | center | HUD position (or just drag it) |
-
-Env vars: `GEMINI_API_KEY`, `XIABB_MODEL` (default: `gemini-2.5-flash`)
-
-## FAQ
-
-**Globe key doesn't work?** Add Terminal.app to Accessibility in System Settings.
-
-**"Too short" in logs?** Hold Globe longer. Adjust `min_duration` in config.
-
-**Traditional Chinese?** Should auto-convert. File an issue if not.
-
-**Different model?** Set `XIABB_MODEL=gemini-2.0-flash` before launching.
-
-**Logs?** `tail -f ~/Library/Logs/XiaBB.log`
-
-**Uninstall?** `bash uninstall.sh`
 
 ---
+
+## Architecture
+
+```
+Hold 🌐 ─── AVAudioEngine (16kHz) ──┬──> Gemini Live WebSocket
+                                     │   (streaming preview → HUD)
+                                     │
+Release  ─── WAV encode ────────────>└──> Gemini REST API
+                                          (final transcription)
+                                               │
+                                      📋 clipboard + ⌘V paste
+```
+
+<details>
+<summary><b>Config options</b></summary>
+
+`.config.json` in install directory:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `lang` | `"zh"` | `"en"` or `"zh"` |
+| `min_duration` | `2.0` | Min recording seconds |
+| `hud_x`/`hud_y` | center | HUD position |
+
+Env vars: `GEMINI_API_KEY`, `XIABB_MODEL` (default `gemini-2.5-flash`)
+
+</details>
+
+<details>
+<summary><b>FAQ</b></summary>
+
+**Globe key not working?** → Add Terminal.app to Accessibility permission.
+
+**"Too short" in logs?** → Hold Globe longer, or lower `min_duration`.
+
+**Traditional Chinese?** → Auto-converts. File an issue if not.
+
+**Logs?** → `tail -f ~/Library/Logs/XiaBB.log`
+
+**Uninstall?** → `bash uninstall.sh`
+
+</details>
+
+---
+
+<div align="center">
 
 ## 中文说明
 
-虾BB（ClawBB）是一个免费开源的 macOS 语音转文字工具。
+虾BB（ClawBB）是免费开源的 macOS 语音转文字工具。
 
-按住键盘左下角的 🌐 Globe 键说话，松开后文字自动出现在光标处。中英文随便混着说，它都能搞定。
+按住 🌐 Globe 键说话，松开后文字自动粘贴到光标位置。
 
-**为什么叫虾BB？** 因为虾BB谐音"瞎BB"——最好的想法，说出来的时候都像在瞎说。🦞
+中英文随便混着说，它都能搞定。
 
-特点：
-- 纯 Swift 原生应用，280KB，零依赖
-- Google Gemini 免费额度，每天 250 次
-- 实时预览（边说边看文字）
-- 自动粘贴到光标位置
-- HUD 悬浮窗 + 龙虾麦克风动画
+**为什么叫虾BB？** 谐音"瞎BB"——最好的想法说出来都像在瞎说 🦞
 
-```bash
-git clone https://github.com/dyz2102/clawbb.git
-cd clawbb && bash install.sh
-```
+纯 Swift · 280KB · Google Gemini 免费额度 · 每天 250 次
 
 ---
 
-## Contributing
+**Built with 🦞 by [dyz2102](https://github.com/dyz2102)**
 
-Issues and PRs welcome. The entire app is one `main.swift` — read it in 10 minutes.
+MIT License
 
-## License
-
-MIT
+</div>
