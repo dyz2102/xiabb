@@ -1,0 +1,26 @@
+# Secrets
+.api-key
+
+# User data
+.config.json
+.usage.json
+
+# Build artifacts
+native/build/
+*.app
+
+# Python legacy (kept locally, not shipped)
+venv/
+__pycache__/
+*.pyc
+xiabb.py
+requirements.txt
+start.sh
+start-native.sh
+
+# macOS
+.DS_Store
+*.swp
+
+# Logs
+*.log
