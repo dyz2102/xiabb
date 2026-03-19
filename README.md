@@ -60,6 +60,9 @@ Text appears at your cursor instantly. No Cmd+V needed.
 **⚡ 280KB Binary**
 Pure Swift. No Electron. No Python. No Node. Just works.
 
+**🎙 Up to 9.5 Hours Per Recording**
+Gemini handles massive audio files. Tested with multi-minute recordings — no cutoffs. MacWhisper chokes on long audio; ClawBB doesn't.
+
 **🆓 Free Forever**
 250 transcriptions/day on Google's free tier. No account needed.
 
