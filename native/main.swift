@@ -107,6 +107,71 @@ func saveConfig(_ updates: [String: Any]) {
     }
 }
 
+// MARK: - Themes / Skins
+
+struct HUDTheme {
+    let name: String
+    let bgRed: CGFloat, bgGreen: CGFloat, bgBlue: CGFloat, bgAlpha: CGFloat
+    let cornerRadius: CGFloat
+    let textColor: NSColor
+    let recordingColor: NSColor
+    let successColor: NSColor
+    let barColor: NSColor  // wave bar color during recording
+    let fontSize: CGFloat
+}
+
+// Theme registry — designed for easy extension. Add new themes here.
+// Future: load from .cbskin files (ZIP with theme.json + assets)
+let themeList: [(id: String, theme: HUDTheme)] = [
+    ("lobster", HUDTheme(
+        name: "🦞 Lobster Red",
+        bgRed: 0.12, bgGreen: 0.06, bgBlue: 0.06, bgAlpha: 0.93,
+        cornerRadius: 12,
+        textColor: .white,
+        recordingColor: NSColor(calibratedRed: 0.94, green: 0.27, blue: 0.27, alpha: 1),
+        successColor: NSColor(calibratedRed: 0.2, green: 0.83, blue: 0.45, alpha: 1),
+        barColor: NSColor(calibratedRed: 0.94, green: 0.27, blue: 0.27, alpha: 1),
+        fontSize: 13
+    )),
+    ("chill", HUDTheme(
+        name: "🌿 Chill Green",
+        bgRed: 0.06, bgGreen: 0.12, bgBlue: 0.08, bgAlpha: 0.92,
+        cornerRadius: 16,
+        textColor: NSColor(calibratedRed: 0.85, green: 1.0, blue: 0.9, alpha: 1),
+        recordingColor: NSColor(calibratedRed: 0.3, green: 0.85, blue: 0.5, alpha: 1),
+        successColor: NSColor(calibratedRed: 0.5, green: 1.0, blue: 0.7, alpha: 1),
+        barColor: NSColor(calibratedRed: 0.3, green: 0.85, blue: 0.5, alpha: 1),
+        fontSize: 13
+    )),
+    ("ocean", HUDTheme(
+        name: "🌊 Ocean Blue",
+        bgRed: 0.04, bgGreen: 0.08, bgBlue: 0.18, bgAlpha: 0.93,
+        cornerRadius: 14,
+        textColor: NSColor(calibratedRed: 0.75, green: 0.92, blue: 1.0, alpha: 1),
+        recordingColor: NSColor(calibratedRed: 0.25, green: 0.65, blue: 1.0, alpha: 1),
+        successColor: NSColor(calibratedRed: 0.3, green: 1.0, blue: 0.75, alpha: 1),
+        barColor: NSColor(calibratedRed: 0.25, green: 0.65, blue: 1.0, alpha: 1),
+        fontSize: 13
+    )),
+    ("sunset", HUDTheme(
+        name: "🌅 Sunset Orange",
+        bgRed: 0.16, bgGreen: 0.08, bgBlue: 0.04, bgAlpha: 0.93,
+        cornerRadius: 14,
+        textColor: NSColor(calibratedRed: 1.0, green: 0.93, blue: 0.82, alpha: 1),
+        recordingColor: NSColor(calibratedRed: 1.0, green: 0.55, blue: 0.15, alpha: 1),
+        successColor: NSColor(calibratedRed: 0.4, green: 0.9, blue: 0.5, alpha: 1),
+        barColor: NSColor(calibratedRed: 1.0, green: 0.55, blue: 0.15, alpha: 1),
+        fontSize: 13
+    )),
+]
+
+let themes: [String: HUDTheme] = Dictionary(uniqueKeysWithValues: themeList.map { ($0.id, $0.theme) })
+
+var currentTheme: HUDTheme = {
+    let name = loadConfig()["theme"] as? String ?? "lobster"
+    return themes[name] ?? themes["lobster"]!
+}()
+
 // MARK: - i18n
 
 let strings: [String: [String: String]] = [
@@ -322,6 +387,7 @@ class AudioRecorder {
     private(set) var frames: [Data] = []
     private let lock = NSLock()
     var isRecording = false
+    private var configObserver: NSObjectProtocol?
 
     func start() {
         guard !isRecording else { return }
@@ -331,30 +397,53 @@ class AudioRecorder {
         let engine = AVAudioEngine()
         self.engine = engine
 
+        // Watch for audio config changes (mic disconnected/changed)
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            log("⚠️ Audio config changed (mic disconnected?)")
+            guard let self = self, self.isRecording else { return }
+            // Try to restart engine with new config
+            do {
+                try self.engine?.start()
+                log("  Audio engine restarted after config change")
+            } catch {
+                log("  ❌ Audio engine restart failed: \(error)")
+                self.isRecording = false
+            }
+        }
+
         let inputNode = engine.inputNode
         let hwFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16kHz mono Int16
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: SAMPLE_RATE, channels: 1, interleaved: true) else {
-            log("❌ Cannot create target audio format")
+        // Validate hardware format
+        guard hwFormat.sampleRate > 0 && hwFormat.channelCount > 0 else {
+            log("❌ Invalid audio input format (no mic?): \(hwFormat)")
             isRecording = false
+            cleanup()
             return
         }
 
-        // Create converter from hardware format to target
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: SAMPLE_RATE, channels: 1, interleaved: true) else {
+            log("❌ Cannot create target audio format")
+            isRecording = false
+            cleanup()
+            return
+        }
+
         guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
             log("❌ Cannot create audio converter")
             isRecording = false
+            cleanup()
             return
         }
         self.converter = converter
 
-        let chunkSize: AVAudioFrameCount = AVAudioFrameCount(hwFormat.sampleRate * 0.1) // 100ms
+        let chunkSize: AVAudioFrameCount = AVAudioFrameCount(hwFormat.sampleRate * 0.1)
 
         inputNode.installTap(onBus: 0, bufferSize: chunkSize, format: hwFormat) { [weak self] buffer, _ in
             guard let self = self, self.isRecording else { return }
 
-            // Convert to 16kHz mono Int16
             let ratio = SAMPLE_RATE / hwFormat.sampleRate
             let outputFrameCount = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
             guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrameCount) else { return }
@@ -363,6 +452,11 @@ class AudioRecorder {
             let status = converter.convert(to: outputBuffer, error: &error) { inNumPackets, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
+            }
+
+            if let error = error {
+                log("⚠️ Audio convert error: \(error.localizedDescription)")
+                return
             }
 
             if status == .haveData || status == .endOfStream, outputBuffer.frameLength > 0 {
@@ -381,7 +475,13 @@ class AudioRecorder {
         } catch {
             log("❌ Audio engine start failed: \(error)")
             isRecording = false
+            cleanup()
         }
+    }
+
+    private func cleanup() {
+        if let o = configObserver { NotificationCenter.default.removeObserver(o) }
+        configObserver = nil
     }
 
     func stop() -> [Data] {
@@ -390,6 +490,7 @@ class AudioRecorder {
         engine?.stop()
         engine = nil
         converter = nil
+        cleanup()
         lock.lock()
         let result = frames
         lock.unlock()
@@ -1033,8 +1134,8 @@ class HUDOverlay {
         // Text label — starts after the brand area
         label = NSTextField(labelWithString: "")
         label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 64, height: 20)
-        label.textColor = .white
-        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = currentTheme.textColor
+        label.font = .systemFont(ofSize: currentTheme.fontSize, weight: .medium)
         label.backgroundColor = .clear
         label.isBezeled = false
         label.isEditable = false
@@ -1078,9 +1179,10 @@ class HUDOverlay {
             resize(for: text)
             label.stringValue = text
             isProcessing = false
-            bars.forEach { $0.isHidden = false; $0.layer?.backgroundColor = NSColor.systemRed.cgColor }
+            let rc = currentTheme.recordingColor
+            bars.forEach { $0.isHidden = false; $0.layer?.backgroundColor = rc.cgColor }
             rightB.isHidden = true
-            hudIcon.contentTintColor = .systemRed
+            hudIcon.contentTintColor = rc
             window.alphaValue = 1.0
             window.orderFrontRegardless()
             isPulsing = true
@@ -1116,7 +1218,7 @@ class HUDOverlay {
                 rightB.isHidden = true
             } else {
                 // BB! pops out at upper-right of icon with spring bounce
-                rightB.textColor = .systemGreen
+                rightB.textColor = currentTheme.successColor
                 rightB.isHidden = false
                 rightB.alphaValue = 0
                 rightB.layer?.setAffineTransform(
@@ -1141,7 +1243,7 @@ class HUDOverlay {
                     }
                 }
             }
-            hudIcon.contentTintColor = isError ? .systemRed : .systemGreen
+            hudIcon.contentTintColor = isError ? currentTheme.recordingColor : currentTheme.successColor
             dot.alphaValue = 1.0
             window.alphaValue = 1.0
             window.orderFrontRegardless()
@@ -1185,8 +1287,9 @@ class HUDOverlay {
 
 class HUDBackground: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12)
-        NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.12, alpha: 0.92).setFill()
+        let t = currentTheme
+        let path = NSBezierPath(roundedRect: bounds, xRadius: t.cornerRadius, yRadius: t.cornerRadius)
+        NSColor(calibratedRed: t.bgRed, green: t.bgGreen, blue: t.bgBlue, alpha: t.bgAlpha).setFill()
         path.fill()
     }
 }
@@ -1295,6 +1398,19 @@ class XiaBBApp: NSObject {
         langItem.submenu = langMenu
         menu.addItem(langItem)
         menuItems["lang"] = langItem
+
+        // Theme selector
+        let themeItem = NSMenuItem(title: currentLang == "zh" ? "皮肤 / Theme" : "Theme", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        for (id, theme) in themeList {
+            let item = NSMenuItem(title: theme.name, action: #selector(switchTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.state = (loadConfig()["theme"] as? String ?? "lobster") == id ? .on : .off
+            themeMenu.addItem(item)
+        }
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
 
         // Permissions / Settings
         let permItem = NSMenuItem(title: S("perm_menu"), action: #selector(showPermissions), keyEquivalent: ",")
@@ -1693,6 +1809,21 @@ class XiaBBApp: NSObject {
         currentLang = "zh"
         saveConfig(["lang": "zh"])
         refreshMenuTitles()
+    }
+
+    @objc func switchTheme(_ sender: NSMenuItem) {
+        guard let themeId = sender.representedObject as? String,
+              let theme = themes[themeId] else { return }
+        currentTheme = theme
+        saveConfig(["theme": themeId])
+        // Update checkmarks
+        if let themeMenu = sender.menu {
+            for item in themeMenu.items { item.state = .off }
+        }
+        sender.state = .on
+        // Rebuild HUD with new theme
+        hud = HUDOverlay()
+        log("🎨 Theme: \(theme.name)")
     }
 
     @objc func showPermissions() {
