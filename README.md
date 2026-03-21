@@ -16,7 +16,7 @@
 
 <br>
 
-<img src="clawbb-demo.gif" width="720" alt="ClawBB Demo">
+<img src="xiabb-demo.gif" width="720" alt="XiaBB Demo">
 
 <br>
 
@@ -77,8 +77,8 @@ Gemini handles massive audio files. Tested with multi-minute recordings — no c
 ## Install
 
 ```bash
-git clone https://github.com/dyz2102/clawbb.git
-cd clawbb && bash install.sh
+git clone https://github.com/dyz2102/xiabb.git
+cd xiabb && bash install.sh
 ```
 
 <details>
@@ -86,7 +86,7 @@ cd clawbb && bash install.sh
 
 ```bash
 xcode-select --install  # Xcode CLT if needed
-cd clawbb/native && bash build.sh
+cd xiabb/native && bash build.sh
 open /Applications/XiaBB.app
 ```
 
