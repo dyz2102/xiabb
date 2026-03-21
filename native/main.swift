@@ -800,6 +800,8 @@ class LiveSession: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    var currentText: String { return t2s(liveText) }
+
     func sendAudio(_ pcmData: Data) {
         guard isActive, let ws = webSocket else { return }
         let b64 = pcmData.base64EncodedString()
@@ -1309,6 +1311,8 @@ class XiaBBApp: NSObject {
     var liveSession: LiveSession?
     var hud: HUDOverlay!
     var liveSendTimer: Timer?
+    var liveReconnectTimer: Timer?
+    var liveAccumulatedText = "" // carries text across reconnections
     var lastSentChunk = 0
     var isTranscribing = false
     var tickCount = 0
@@ -1634,12 +1638,8 @@ class XiaBBApp: NSObject {
         lastSentChunk = 0
 
         // Start live session for real-time preview
-        log("  Starting live session...")
-        liveSession = LiveSession()
-        liveSession?.start { [weak self] text in
-            let display = text.count > 60 ? String(text.suffix(60)) : text
-            self?.hud.updateText(display)
-        }
+        liveAccumulatedText = ""
+        startNewLiveSession()
 
         // Timer to send audio chunks to live session
         DispatchQueue.main.async { [weak self] in
@@ -1654,8 +1654,31 @@ class XiaBBApp: NSObject {
                     }
                 }
             }
+
+            // Reconnect live session every 15s to prevent degradation
+            self?.liveReconnectTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+                guard let self = self, self.recorder.isRecording else { return }
+                // Save text from current session before reconnecting
+                if let currentSession = self.liveSession {
+                    self.liveAccumulatedText = self.liveAccumulatedText + currentSession.currentText
+                    log("[live] 🔄 Reconnecting (15s). Accumulated: \(self.liveAccumulatedText.count) chars")
+                    currentSession.stop()
+                }
+                self.startNewLiveSession()
+            }
         }
         log("🎙 Recording started")
+    }
+
+    func startNewLiveSession() {
+        liveSession = LiveSession()
+        liveSession?.start { [weak self] sessionText in
+            guard let self = self else { return }
+            // Combine accumulated text from previous sessions + current session text
+            let fullText = self.liveAccumulatedText + sessionText
+            let display = fullText.count > 60 ? String(fullText.suffix(60)) : fullText
+            self.hud.updateText(display)
+        }
     }
 
     func stopRecording() {
@@ -1669,9 +1692,12 @@ class XiaBBApp: NSObject {
         DispatchQueue.main.async { [weak self] in
             self?.liveSendTimer?.invalidate()
             self?.liveSendTimer = nil
+            self?.liveReconnectTimer?.invalidate()
+            self?.liveReconnectTimer = nil
         }
         liveSession?.stop()
         liveSession = nil
+        liveAccumulatedText = ""
 
         // Ignore accidental taps (< minRecordingDuration, default 2.0s)
         if duration < minRecordingDuration {
