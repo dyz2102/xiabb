@@ -1519,64 +1519,15 @@ class XiaBBApp: NSObject {
         log("AXIsProcessTrusted: \(trusted)")
 
         if !trusted {
-            log("⚠️ Not trusted for accessibility")
+            log("⚠️ Not trusted for accessibility — prompting user")
 
-            // Check if we're already running from Terminal context
-            let fromTerminal = ProcessInfo.processInfo.environment["XIABB_VIA_TERMINAL"] != nil
-
-            if !fromTerminal {
-                // Relaunch via Terminal.app — Terminal has accessibility permission,
-                // and child processes inherit it. We minimize the window immediately
-                // so it's not visible to the user.
-                log("   Relaunching via terminal to inherit accessibility...")
-                let binary = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
-                let cmd = "XIABB_VIA_TERMINAL=1 nohup '\(binary)' 2>>~/Library/Logs/XiaBB.log 1>/dev/null & sleep 0.5; exit"
-
-                // Detect which terminal app to use (iTerm2 preferred, then Terminal.app)
-                let hasITerm = FileManager.default.fileExists(atPath: "/Applications/iTerm.app")
-                let termApp = hasITerm ? "iTerm" : "Terminal"
-                log("   Using \(termApp)")
-
-                let script: String
-                if hasITerm {
-                    script = """
-                    tell application "iTerm"
-                        set newWindow to (create window with default profile command "\(cmd)")
-                    end tell
-                    delay 2
-                    tell application "System Events"
-                        set visible of process "iTerm2" to false
-                    end tell
-                    """
-                } else {
-                    script = """
-                    tell application "Terminal"
-                        do script "\(cmd)"
-                    end tell
-                    delay 2
-                    tell application "System Events"
-                        set visible of process "Terminal" to false
-                    end tell
-                    """
-                }
-
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                proc.arguments = ["-e", script]
-                try? proc.run()
-                proc.waitUntilExit()
-                log("   \(termApp) launched XiaBB in background")
-                exit(0)
-            }
-
-            // If we're already via Terminal and STILL not trusted, show prompt
-            log("⚠️ Running via Terminal but still not trusted — showing prompt")
+            // Trigger system accessibility permission prompt
             let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
             AXIsProcessTrustedWithOptions(opts)
 
-            // Poll for permission grant
+            // Poll for permission grant (user may grant it in System Settings)
             DispatchQueue.global().async { [weak self] in
-                for _ in 0..<120 {
+                for _ in 0..<300 { // check every 2s for up to 10 minutes
                     Thread.sleep(forTimeInterval: 2)
                     if AXIsProcessTrusted() {
                         log("✅ Accessibility granted! Setting up event tap...")
