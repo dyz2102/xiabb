@@ -1525,20 +1525,19 @@ class XiaBBApp: NSObject {
             let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
             AXIsProcessTrustedWithOptions(opts)
 
-            // Poll for permission grant (user may grant it in System Settings)
-            DispatchQueue.global().async { [weak self] in
-                for _ in 0..<300 { // check every 2s for up to 10 minutes
-                    Thread.sleep(forTimeInterval: 2)
-                    if AXIsProcessTrusted() {
-                        log("✅ Accessibility granted! Setting up event tap...")
-                        DispatchQueue.main.async {
-                            self?.setupEventTapCore()
-                        }
-                        return
-                    }
+            // Listen for accessibility permission change via system notification (no polling)
+            DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.accessibility.api"),
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                if AXIsProcessTrusted() {
+                    log("✅ Accessibility granted! Setting up event tap...")
+                    self?.setupEventTapCore()
+                    DistributedNotificationCenter.default().removeObserver(self as Any)
                 }
-                log("⏰ Timed out waiting for accessibility permission")
             }
+
+            log("   Listening for Accessibility permission change...")
             return
         }
 
