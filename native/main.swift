@@ -1033,6 +1033,7 @@ class HUDOverlay {
     private var hudIcon: NSImageView!
     private var leftB: NSTextField!
     private var rightB: NSTextField!
+    private var copyBtn: NSButton!
     var resultText = ""
     private var hideTimer: Timer?
     private var pulsePhase: Double = 0
@@ -1135,7 +1136,7 @@ class HUDOverlay {
 
         // Text label — starts after the brand area
         label = NSTextField(labelWithString: "")
-        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 64, height: 20)
+        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 86, height: 20)
         label.textColor = currentTheme.textColor
         label.font = .systemFont(ofSize: currentTheme.fontSize, weight: .medium)
         label.backgroundColor = .clear
@@ -1145,7 +1146,19 @@ class HUDOverlay {
         label.lineBreakMode = .byTruncatingHead
         cv.addSubview(label)
 
-        // Enable click to copy
+        // Copy button — right side of HUD, hidden until result
+        copyBtn = NSButton(frame: NSRect(x: w - 36, y: (h - 20) / 2, width: 28, height: 20))
+        copyBtn.title = "📋"
+        copyBtn.bezelStyle = .inline
+        copyBtn.isBordered = false
+        copyBtn.font = .systemFont(ofSize: 14)
+        copyBtn.target = self
+        copyBtn.action = #selector(handleClick)
+        copyBtn.toolTip = "复制 / Copy"
+        copyBtn.isHidden = true
+        cv.addSubview(copyBtn)
+
+        // Also keep whole-HUD click to copy
         let clickGR = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
         window.contentView?.addGestureRecognizer(clickGR)
     }
@@ -1154,10 +1167,12 @@ class HUDOverlay {
         guard !resultText.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(resultText, forType: .string)
-        let saved = resultText
-        label.stringValue = L("copied")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.label.stringValue = String(saved.prefix(60))
+        label.stringValue = "✅ " + L("copied")
+        copyBtn.title = "✅"
+        // Hide after brief confirmation
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
+            self?.hide()
         }
     }
 
@@ -1170,7 +1185,8 @@ class HUDOverlay {
         window.setFrame(NSRect(x: newX, y: f.origin.y, width: w, height: h), display: true)
         bg.frame = NSRect(x: 0, y: 0, width: w, height: h)
         bg.needsDisplay = true
-        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 64, height: 20)
+        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 86, height: 20)
+        copyBtn.frame = NSRect(x: w - 36, y: (h - 20) / 2, width: 28, height: 20)
     }
 
     func show(text: String) {
@@ -1184,6 +1200,7 @@ class HUDOverlay {
             let rc = currentTheme.recordingColor
             bars.forEach { $0.isHidden = false; $0.layer?.backgroundColor = rc.cgColor }
             rightB.isHidden = true
+            copyBtn.isHidden = true
             hudIcon.contentTintColor = rc
             window.alphaValue = 1.0
             window.orderFrontRegardless()
@@ -1246,12 +1263,13 @@ class HUDOverlay {
                 }
             }
             hudIcon.contentTintColor = isError ? currentTheme.recordingColor : currentTheme.successColor
+            copyBtn.isHidden = isError  // show copy button on success
             dot.alphaValue = 1.0
             window.alphaValue = 1.0
             window.orderFrontRegardless()
 
             hideTimer?.invalidate()
-            hideTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+            hideTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
                 self?.hide()
             }
         }
@@ -1510,21 +1528,44 @@ class XiaBBApp: NSObject {
                 // Relaunch via Terminal.app — Terminal has accessibility permission,
                 // and child processes inherit it. We minimize the window immediately
                 // so it's not visible to the user.
-                log("   Relaunching via Terminal.app (minimized) to inherit accessibility...")
+                log("   Relaunching via terminal to inherit accessibility...")
                 let binary = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
-                let script = """
-                tell application "Terminal"
-                    set w to do script "XIABB_VIA_TERMINAL=1 exec '\(binary)' 2>>~/Library/Logs/XiaBB.log"
-                    delay 0.5
-                    set miniaturized of front window to true
-                end tell
-                """
+                let cmd = "XIABB_VIA_TERMINAL=1 nohup '\(binary)' 2>>~/Library/Logs/XiaBB.log 1>/dev/null & sleep 0.5; exit"
+
+                // Detect which terminal app to use (iTerm2 preferred, then Terminal.app)
+                let hasITerm = FileManager.default.fileExists(atPath: "/Applications/iTerm.app")
+                let termApp = hasITerm ? "iTerm" : "Terminal"
+                log("   Using \(termApp)")
+
+                let script: String
+                if hasITerm {
+                    script = """
+                    tell application "iTerm"
+                        set newWindow to (create window with default profile command "\(cmd)")
+                    end tell
+                    delay 2
+                    tell application "System Events"
+                        set visible of process "iTerm2" to false
+                    end tell
+                    """
+                } else {
+                    script = """
+                    tell application "Terminal"
+                        do script "\(cmd)"
+                    end tell
+                    delay 2
+                    tell application "System Events"
+                        set visible of process "Terminal" to false
+                    end tell
+                    """
+                }
+
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
                 proc.arguments = ["-e", script]
                 try? proc.run()
                 proc.waitUntilExit()
-                log("   Terminal launch initiated (minimized), exiting .app process")
+                log("   \(termApp) launched XiaBB in background")
                 exit(0)
             }
 
@@ -1632,7 +1673,7 @@ class XiaBBApp: NSObject {
         playSound(sfxStart())
 
         let remaining = usage.remaining
-        hud.show(text: "\(L("listening"))  (\(remaining) \(L("left")))")
+        hud.show(text: L("listening"))
 
         recorder.start()
         lastSentChunk = 0
