@@ -920,31 +920,36 @@ class PermissionsWindow {
         subtitle.frame = NSRect(x: pad, y: h - 30, width: w - pad * 2, height: 18)
         cv.addSubview(subtitle)
 
-        // Permission rows
+        // Permission rows — ORDER: 1. API Key, 2. Microphone, 3. Accessibility (last because needs restart)
         let firstRowY = h - 48 - rowH
         let accOK = AXIsProcessTrusted()
-        let micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let micOK = micStatus == .authorized
         let keyOK = !apiKey.isEmpty
 
+        // Row 1: API Key (easiest, do first)
+        let keyDetail = keyOK ? "\(S("key_detail_ok")) (\(apiKey.prefix(8))...)" : S("key_detail_no")
         addRow(to: cv, y: firstRowY, w: w, pad: pad,
-               title: S("acc_title"), detail: S("acc_detail"), granted: accOK) {
-            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+               title: S("key_title"), detail: keyDetail, granted: keyOK) {
+            NSWorkspace.shared.open(URL(string: "https://aistudio.google.com/apikey")!)
         }
 
-        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        // Row 2: Microphone — actively request permission on first click
         addRow(to: cv, y: firstRowY - rowH, w: w, pad: pad,
                title: S("mic_title"), detail: S("mic_detail"), granted: micOK) {
             if micStatus == .notDetermined {
+                // This triggers the system "allow microphone" dialog
                 AVCaptureDevice.requestAccess(for: .audio) { _ in }
             } else {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
             }
         }
 
-        let keyDetail = keyOK ? "\(S("key_detail_ok")) (\(apiKey.prefix(8))...)" : S("key_detail_no")
+        // Row 3: Accessibility (last — needs restart, so user does everything else first)
+        let accDetail = accOK ? S("acc_detail") : (currentLang == "zh" ? "授权后需重启 app" : "Restart app after granting")
         addRow(to: cv, y: firstRowY - rowH * 2, w: w, pad: pad,
-               title: S("key_title"), detail: keyDetail, granted: keyOK) {
-            NSWorkspace.shared.open(URL(string: "https://aistudio.google.com/apikey")!)
+               title: S("acc_title"), detail: accDetail, granted: accOK) {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
         }
 
         // Bottom status
@@ -1473,6 +1478,16 @@ class XiaBBApp: NSObject {
         log("   HUD:    drag to reposition")
         log("✅ Ready!")
 
+        // Request microphone permission on first launch
+        // The system dialog appears when user first tries to record (AVAudioEngine.start)
+        // For now just use AVCaptureDevice to pre-request — the real dialog
+        // will appear on first Globe key press if this doesn't trigger it
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                log("🎤 Microphone: \(granted ? "granted" : "denied")")
+            }
+        }
+
         // Auto-show permissions on first launch or if any permission is missing
         let hasSeenOnboarding = loadConfig()["onboarded"] as? Bool ?? false
         let missingPerms = !AXIsProcessTrusted()
@@ -1787,9 +1802,21 @@ class XiaBBApp: NSObject {
     }
 
     @objc func configureAPI() {
+        // Show current key masked (first 8 + *** + last 4)
+        let currentDisplay: String
+        if apiKey.isEmpty {
+            currentDisplay = ""
+        } else if apiKey.count > 16 {
+            currentDisplay = String(apiKey.prefix(8)) + "****" + String(apiKey.suffix(4))
+        } else {
+            currentDisplay = String(apiKey.prefix(4)) + "****"
+        }
+        let prompt = currentLang == "zh"
+            ? "输入 Gemini API Key\\n(免费获取: aistudio.google.com/apikey)\\n\\n留空点 Save 不会清除已有 Key"
+            : "Enter Gemini API Key\\n(Free: aistudio.google.com/apikey)\\n\\nLeave empty + Save won't clear existing key"
         let script = """
         tell application "System Events"
-          display dialog "\(L("configure_api"))\\n(Get one free at aistudio.google.com/apikey)" default answer "" with title "XiaBB API Config" buttons {"Cancel", "Save"} default button "Save"
+          display dialog "\(prompt)" default answer "\(currentDisplay)" with title "XiaBB API Config" buttons {"Cancel", "Save"} default button "Save"
           set theKey to text returned of result
           return theKey
         end tell
@@ -1803,10 +1830,22 @@ class XiaBBApp: NSObject {
         try? proc.run()
         proc.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if proc.terminationStatus == 0 && !output.isEmpty {
+        // Only save if user entered a new key (not the masked display)
+        if proc.terminationStatus == 0 && !output.isEmpty && output != currentDisplay {
             let keyFile = dataDir.appendingPathComponent(".api-key")
             try? output.write(to: keyFile, atomically: true, encoding: .utf8)
             apiKey = output
+            log("🔑 API key saved")
+            // Show confirmation
+            let confirmScript = """
+            tell application "System Events"
+              display notification "API Key 已保存 ✅" with title "XiaBB"
+            end tell
+            """
+            let p2 = Process()
+            p2.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p2.arguments = ["-e", confirmScript]
+            try? p2.run()
         }
     }
 
