@@ -4,6 +4,8 @@
 # User data
 .config.json
 .usage.json
+.dictionary.json
+dictionary.json
 
 # Build artifacts
 native/build/
@@ -24,3 +26,6 @@ start-native.sh
 
 # Logs
 *.log
+
+# Distribution
+*.dmg
