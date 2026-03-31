@@ -9,7 +9,8 @@ CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
-echo "🦞 Building XiaBB native app..."
+VERSION=$(cat "$XIABB_DIR/VERSION" 2>/dev/null || echo "0.0.0")
+echo "🦞 Building XiaBB v${VERSION}..."
 
 # Clean
 rm -rf "$BUILD_DIR"
@@ -23,13 +24,14 @@ swiftc -O \
     -framework AVFoundation \
     -framework CoreGraphics \
     -framework CoreAudio \
+    -framework WebKit \
     -target arm64-apple-macosx14.0 \
     "$SCRIPT_DIR/main.swift"
 
 echo "   Binary size: $(du -h "$MACOS/XiaBB" | cut -f1)"
 
 # Info.plist
-cat > "$CONTENTS/Info.plist" << 'PLIST'
+cat > "$CONTENTS/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,9 +43,9 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.xiabb</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>XiaBB</string>
     <key>CFBundleIconFile</key>

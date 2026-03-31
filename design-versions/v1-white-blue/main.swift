@@ -12,36 +12,20 @@ import WebKit
 
 let logFileURL: URL = {
     let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/XiaBB.log")
-    // Rotate: keep previous log as .log.1 (preserves crash-time logs)
-    let prev = url.deletingPathExtension().appendingPathExtension("log.1")
-    let fm = FileManager.default
-    if fm.fileExists(atPath: url.path) {
-        try? fm.removeItem(at: prev)
-        try? fm.moveItem(at: url, to: prev)
-    }
-    fm.createFile(atPath: url.path, contents: nil)
+    // Truncate on launch (keep last log only)
+    try? "".write(to: url, atomically: true, encoding: .utf8)
     return url
 }()
 
-// Persistent file handle — avoids open/seek/close on every log line
-private let logFileHandle: FileHandle? = try? FileHandle(forWritingTo: logFileURL)
-private let logLock = NSLock()
-
 func log(_ msg: String) {
     let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    // Sanitize: strip API keys from log output (e.g. ?key=AIza...)
-    let sanitized = msg.replacingOccurrences(
-        of: "key=[A-Za-z0-9_-]{10,}",
-        with: "key=***REDACTED***",
-        options: .regularExpression
-    )
-    let line = "[\(ts)] \(sanitized)\n"
+    let line = "[\(ts)] \(msg)\n"
     fputs(line, stderr)
-    if let data = line.data(using: .utf8) {
-        logLock.lock()
-        logFileHandle?.seekToEndOfFile()
-        logFileHandle?.write(data)
-        logLock.unlock()
+    // Also write to log file for debugging when launched via Finder
+    if let fh = try? FileHandle(forWritingTo: logFileURL) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
     }
 }
 
@@ -66,24 +50,9 @@ Transcribe this audio exactly as spoken, with proper punctuation.
 - Output ONLY the transcribed text.
 """
 
-// MARK: - Paths
-
-let scriptDir: URL = {
-    // Resources dir in .app bundle, fallback to ~/Tools/xiabb/
-    if let resourcePath = Bundle.main.resourceURL {
-        return resourcePath
-    }
-    return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Tools/xiabb")
-}()
-
-let dataDir: URL = {
-    // Config/usage data directory
-    return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Tools/xiabb")
-}()
-
 // MARK: - Custom Dictionary
 
-let dictionaryFile = dataDir.appendingPathComponent("dictionary.json")
+let dictionaryFile = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Tools/xiabb/.dictionary.json")
 
 func loadDictionary() -> [String] {
     guard let data = try? Data(contentsOf: dictionaryFile),
@@ -112,6 +81,21 @@ func buildPrompt() -> String {
     let wordList = words.map { "\"\($0)\"" }.joined(separator: ", ")
     return BASE_PROMPT + "\n- IMPORTANT: The following words/names must be transcribed EXACTLY as specified (case-sensitive): \(wordList). Do NOT substitute similar-sounding words."
 }
+
+// MARK: - Paths
+
+let scriptDir: URL = {
+    // Resources dir in .app bundle, fallback to ~/Tools/xiabb/
+    if let resourcePath = Bundle.main.resourceURL {
+        return resourcePath
+    }
+    return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Tools/xiabb")
+}()
+
+let dataDir: URL = {
+    // Config/usage data directory
+    return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Tools/xiabb")
+}()
 
 // MARK: - API Key
 
@@ -174,12 +158,12 @@ struct HUDTheme {
 let themeList: [(id: String, theme: HUDTheme)] = [
     ("lobster", HUDTheme(
         name: "🦞 Lobster Red",
-        bgRed: 0.157, bgGreen: 0.149, bgBlue: 0.145, bgAlpha: 0.93,  // #282828
+        bgRed: 0.12, bgGreen: 0.06, bgBlue: 0.06, bgAlpha: 0.93,
         cornerRadius: 12,
-        textColor: NSColor(calibratedRed: 0.922, green: 0.859, blue: 0.698, alpha: 1),  // #EBDBB2 cream
-        recordingColor: NSColor(calibratedRed: 0.918, green: 0.412, blue: 0.384, alpha: 1),  // #EA6962 coral
-        successColor: NSColor(calibratedRed: 0.663, green: 0.714, blue: 0.396, alpha: 1),  // #A9B665 green
-        barColor: NSColor(calibratedRed: 0.918, green: 0.412, blue: 0.384, alpha: 1),  // #EA6962 coral
+        textColor: .white,
+        recordingColor: NSColor(calibratedRed: 0.94, green: 0.27, blue: 0.27, alpha: 1),
+        successColor: NSColor(calibratedRed: 0.2, green: 0.83, blue: 0.45, alpha: 1),
+        barColor: NSColor(calibratedRed: 0.94, green: 0.27, blue: 0.27, alpha: 1),
         fontSize: 13
     )),
     ("chill", HUDTheme(
@@ -419,47 +403,13 @@ func combineSounds(_ wavDatas: [Data]) -> Data {
 }
 
 var currentSound: NSSound?
-private let soundLock = NSLock()
 
 func playSound(_ wavData: Data) {
     DispatchQueue.global(qos: .userInteractive).async {
         let sound = NSSound(data: wavData)
         sound?.play()
-        soundLock.lock()
         currentSound = sound // prevent dealloc
-        soundLock.unlock()
     }
-}
-
-// MARK: - Audio Input Check
-
-/// Check if a real audio input device (microphone) is available.
-/// Filters out virtual audio devices (Zoom, BlackHole, Soundflower, etc.)
-/// that can't actually capture microphone audio.
-func hasPhysicalAudioInput() -> Bool {
-    let devices = AVCaptureDevice.DiscoverySession(
-        deviceTypes: [.microphone, .external],
-        mediaType: .audio,
-        position: .unspecified
-    ).devices
-
-    // Filter out known virtual audio devices
-    let virtualKeywords = ["zoom", "blackhole", "soundflower", "loopback",
-                           "virtual", "aggregate", "multi-output"]
-    let physical = devices.filter { dev in
-        let name = dev.localizedName.lowercased()
-        return !virtualKeywords.contains(where: { name.contains($0) })
-    }
-
-    let allNames = devices.map { $0.localizedName }
-    let physicalNames = physical.map { $0.localizedName }
-    log("🎤 Audio input devices: \(allNames), physical: \(physicalNames)")
-
-    if physical.isEmpty {
-        log("❌ No physical microphone found (only virtual: \(allNames))")
-        return false
-    }
-    return true
 }
 
 // MARK: - Audio Recording
@@ -470,21 +420,10 @@ class AudioRecorder {
     private(set) var frames: [Data] = []
     private let lock = NSLock()
     var isRecording = false
-    var noMicHandler: (() -> Void)?
     private var configObserver: NSObjectProtocol?
-    // Serial queue for all AVAudioEngine operations — prevents concurrent installTap/removeTap crashes
-    let audioQueue = DispatchQueue(label: "com.xiabb.audio")
 
     func start() {
         guard !isRecording else { return }
-
-        // Check for physical microphone BEFORE touching AVAudioEngine
-        guard hasPhysicalAudioInput() else {
-            log("❌ No microphone connected. Please connect a mic and try again.")
-            noMicHandler?()
-            return
-        }
-
         frames = []
         isRecording = true
 
@@ -534,9 +473,6 @@ class AudioRecorder {
         self.converter = converter
 
         let chunkSize: AVAudioFrameCount = AVAudioFrameCount(hwFormat.sampleRate * 0.1)
-
-        // Safety: remove any existing tap before installing a new one
-        inputNode.removeTap(onBus: 0)
 
         inputNode.installTap(onBus: 0, bufferSize: chunkSize, format: hwFormat) { [weak self] buffer, _ in
             guard let self = self, self.isRecording else { return }
@@ -749,14 +685,12 @@ class LiveSession: NSObject, URLSessionWebSocketDelegate {
         webSocket = urlSession?.webSocketTask(with: url)
         webSocket?.resume()
 
-        // Send setup message — include custom dictionary for accurate real-time transcription
-        let dictWords = loadDictionary()
-        let dictHint = dictWords.isEmpty ? "" : " These proper nouns must be transcribed exactly: \(dictWords.joined(separator: ", "))."
+        // Send setup message
         let setup: [String: Any] = [
             "setup": [
                 "model": "models/\(MODEL_LIVE)",
                 "generationConfig": ["responseModalities": ["AUDIO"]],
-                "systemInstruction": ["parts": [["text": "Listen and acknowledge briefly. ALL Chinese must be Simplified (简体中文).\(dictHint)"]]],
+                "systemInstruction": ["parts": [["text": "Listen and acknowledge briefly."]]],
                 "inputAudioTranscription": [:] as [String: Any],
             ]
         ]
@@ -769,9 +703,7 @@ class LiveSession: NSObject, URLSessionWebSocketDelegate {
 
         webSocket?.send(.string(setupStr)) { [weak self] error in
             if let error = error {
-                if self?.isActive == true {
-                    log("[live] Setup send error: \(error)")
-                }
+                log("[live] Setup send error: \(error)")
                 return
             }
             log("[live] Setup message sent, waiting for response...")
@@ -918,10 +850,7 @@ class LiveSession: NSObject, URLSessionWebSocketDelegate {
               let str = String(data: data, encoding: .utf8) else { return }
         ws.send(.string(str)) { [weak self] error in
             if let error = error {
-                // Suppress "cancelled" errors during teardown to avoid log spam
-                if self?.isActive == true {
-                    log("[live] Audio send error: \(error)")
-                }
+                log("[live] Audio send error: \(error)")
             } else {
                 self?.chunksSent += 1
             }
@@ -961,13 +890,13 @@ private let onboardingHTML = """
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --accent: #EA6962;
-    --accent-light: #fef2f0;
-    --accent-dark: #d65d57;
+    --blue: #3b82f6;
+    --blue-light: #eff6ff;
+    --blue-dark: #2563eb;
     --green: #22c55e;
     --green-light: #f0fdf4;
-    --red: #EA6962;
-    --red-light: #fef2f0;
+    --red: #ef4444;
+    --red-light: #fef2f2;
     --gray-50: #f9fafb;
     --gray-100: #f3f4f6;
     --gray-200: #e5e7eb;
@@ -978,7 +907,7 @@ private let onboardingHTML = """
   }
 
   body {
-    font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     background: #ffffff;
     color: var(--gray-900);
     height: 550px;
@@ -1007,8 +936,8 @@ private let onboardingHTML = """
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--gray-200); transition: all 0.3s ease;
   }
-  .step-dot.done   { background: var(--accent); }
-  .step-dot.active { background: var(--accent); width: 20px; border-radius: 4px; }
+  .step-dot.done   { background: var(--blue); }
+  .step-dot.active { background: var(--blue); width: 20px; border-radius: 4px; }
 
   .step-content {
     flex: 1; overflow-y: auto; padding: 0 40px 16px;
@@ -1016,8 +945,8 @@ private let onboardingHTML = """
   }
   .step-nav {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 32px 20px; border-top: 1px solid var(--gray-200);
-    background: #ffffff; min-height: 64px;
+    padding: 12px 32px 20px; border-top: 1px solid var(--gray-100);
+    background: #fff; min-height: 64px;
   }
 
   h1 { font-size: 26px; font-weight: 700; line-height: 1.2; }
@@ -1031,8 +960,8 @@ private let onboardingHTML = """
     border: none; cursor: pointer; transition: all 0.15s ease; outline: none;
     -webkit-app-region: no-drag;
   }
-  .btn-primary { background: var(--accent); color: #fff; font-weight: 600; box-shadow: 0 1px 3px rgba(234,105,98,0.3); }
-  .btn-primary:hover { background: var(--accent-dark); }
+  .btn-primary { background: var(--blue); color: #fff; box-shadow: 0 1px 3px rgba(59,130,246,0.3); }
+  .btn-primary:hover { background: var(--blue-dark); }
   .btn-primary:active { transform: scale(0.97); }
   .btn-primary:disabled { background: var(--gray-200); color: var(--gray-400); box-shadow: none; cursor: not-allowed; }
   .btn-secondary { background: var(--gray-100); color: var(--gray-700); border: 1px solid var(--gray-200); }
@@ -1059,16 +988,16 @@ private let onboardingHTML = """
   .badge-success { background: var(--green-light); color: #15803d; }
   .badge-pending { background: var(--gray-100);    color: var(--gray-500); }
   .badge-error   { background: var(--red-light);   color: #b91c1c; }
-  .badge-loading { background: var(--accent-light);  color: var(--accent-dark); }
+  .badge-loading { background: var(--blue-light);  color: var(--blue-dark); }
 
   .input-row { display: flex; gap: 8px; margin: 12px 0; }
   .input-field {
     flex: 1; padding: 9px 14px; border: 1.5px solid var(--gray-200);
     border-radius: 10px; font-size: 13px; font-family: "SF Mono", monospace;
-    color: var(--gray-900); background: #ffffff; outline: none;
+    color: var(--gray-900); background: #fff; outline: none;
     transition: border-color 0.15s; -webkit-app-region: no-drag;
   }
-  .input-field:focus { border-color: var(--accent); }
+  .input-field:focus { border-color: var(--blue); }
   .input-field.error   { border-color: var(--red); }
   .input-field.success { border-color: var(--green); }
 
@@ -1082,12 +1011,12 @@ private let onboardingHTML = """
     width: 10px; background: var(--gray-200); border-radius: 3px;
     min-height: 4px; transition: height 0.06s ease-out, background 0.06s ease-out;
   }
-  .mic-bar.active { background: var(--accent); }
+  .mic-bar.active { background: var(--blue); }
 
   .app-icon {
     display: inline-flex; align-items: center; justify-content: center;
-    background: #f9fafb; border-radius: 22%;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 1px 3px rgba(0,0,0,0.06);
+    background: #fff; border-radius: 22%;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.08);
     line-height: 1; flex-shrink: 0;
   }
   .app-icon-lg { width: 80px; height: 80px; font-size: 48px; border-radius: 18px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.14), 0 1px 4px rgba(0,0,0,0.10); }
@@ -1105,12 +1034,12 @@ private let onboardingHTML = """
     display: flex; align-items: center; justify-content: center;
     font-size: 36px; margin: 20px auto 16px; transition: all 0.15s ease;
   }
-  .globe-key.pressed { background: #fdf0ee; border-color: var(--accent); transform: scale(1.10); box-shadow: 0 0 0 4px rgba(234,105,98,0.2); }
-  .globe-key.detected { background: #fdf0ee; border-color: var(--accent); transform: scale(1.05); }
+  .globe-key.pressed { background: #eff6ff; border-color: var(--blue); transform: scale(1.10); box-shadow: 0 0 0 4px rgba(59,130,246,0.2); }
+  .globe-key.detected { background: #eff6ff; border-color: var(--blue); transform: scale(1.05); }
 
   /* Step 5 mock window */
   .mock-window {
-    background: #ffffff;
+    background: #fff;
     border-radius: 12px;
     border: 1px solid #e5e7eb;
     box-shadow: 0 4px 16px rgba(0,0,0,0.08);
@@ -1153,7 +1082,7 @@ private let onboardingHTML = """
   .divider { border: none; border-top: 1px solid var(--gray-100); margin: 12px 0; }
 
   .link-btn {
-    color: var(--accent); font-size: 13px; cursor: pointer;
+    color: var(--blue); font-size: 13px; cursor: pointer;
     text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
     background: none; border: none; padding: 0; font-family: inherit;
     -webkit-app-region: no-drag;
@@ -1164,46 +1093,13 @@ private let onboardingHTML = """
   .welcome-content {
     padding: 24px 40px; display: flex; flex-direction: column; align-items: center;
   }
-  .app-name { font-size: 22px; font-weight: 600; margin-bottom: 4px; color: var(--gray-500); }
-  .app-brand { font-size: 52px; font-weight: 800; margin-bottom: 12px; color: var(--accent); font-style: italic; letter-spacing: -1px; }
-  .app-desc { font-size: 15px; color: var(--gray-500); line-height: 1.7; max-width: 380px; font-style: italic; }
-
-  /* Illustration placeholders */
-  .illust {
-    display: flex; align-items: center; justify-content: center;
-    border-radius: 16px; overflow: hidden;
-  }
-  .illust-welcome {
-    width: 180px; height: 180px; margin: 0 auto 8px;
-    background: linear-gradient(135deg, #fef2f0 0%, #fff5f4 100%);
-    border: 2px dashed var(--accent);
-    opacity: 0.9;
-  }
-  .illust-float {
-    position: absolute; opacity: 0.12; pointer-events: none;
-  }
-  .illust-float svg { width: 100%; height: 100%; }
-  .step-illust {
-    width: 64px; height: 64px; margin: 0 auto 12px;
-    background: #fef2f0; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .step-illust svg { width: 36px; height: 36px; opacity: 0.7; }
-
-  /* Sketchy card style for fun */
-  .card-sketchy {
-    background: var(--gray-50);
-    border: 2px solid var(--gray-200);
-    border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
-    padding: 16px 20px; margin: 8px 0;
-    transition: transform 0.2s ease;
-  }
-  .card-sketchy:hover { transform: rotate(-0.5deg); }
+  .app-name { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+  .app-desc { font-size: 15px; color: var(--gray-500); line-height: 1.7; max-width: 380px; }
 
   @keyframes spin { to { transform: rotate(360deg); } }
   .spinner {
     width: 14px; height: 14px; border: 2px solid var(--gray-200);
-    border-top-color: var(--accent); border-radius: 50%;
+    border-top-color: var(--blue); border-radius: 50%;
     animation: spin 0.7s linear infinite; flex-shrink: 0; display: inline-block;
   }
 
@@ -1223,16 +1119,12 @@ private let onboardingHTML = """
 <!-- STEP 0: WELCOME -->
 <div class="step active" id="step-0">
   <div class="welcome-content" style="flex:1; justify-content:center;">
-    <!-- Lobster illustration placeholder -->
-    <div class="illust illust-welcome">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="120" height="120" fill="#EA6962" opacity="0.6"><g transform="translate(0,512) scale(0.1,-0.1)" stroke="none"><path d="M1966 4593 c-52 -19 -61 -29 -47 -51 6 -11 16 -11 47 -3 179 50 341 -76 368 -284 l6 -50 -53 -29 c-123 -70 -241 -239 -254 -369 l-6 -57 150 0 c133 0 152 -2 166 -18 21 -23 22 -46 2 -66 -12 -12 -43 -15 -153 -15 -75 1 -143 0 -149 0 -8 -1 -13 -17 -13 -46 l0 -44 156 -3 c134 -3 158 -5 167 -20 8 -12 8 -24 -1 -42 l-12 -26 -155 0 -155 0 0 -45 0 -45 153 0 c161 0 177 -4 177 -45 0 -41 -16 -45 -177 -45 l-153 0 0 -45 0 -45 153 0 c161 0 177 -4 177 -45 0 -41 -16 -45 -177 -45 l-153 0 0 -40 0 -40 83 -1 c268 -4 973 4 980 11 5 4 7 20 5 36 l-3 29 -158 5 c-125 4 -160 8 -167 20 -13 20 -12 33 3 53 10 14 36 17 167 19 l155 3 0 40 0 40 -155 3 c-131 2 -157 5 -167 19 -17 22 -16 38 3 57 13 13 42 16 165 16 l149 0 6 24 c3 14 3 34 -1 45 -6 20 -13 21 -155 21 -147 0 -150 0 -165 24 -13 19 -14 29 -5 45 10 20 19 21 165 21 l155 0 0 45 0 45 -145 0 c-132 0 -147 2 -165 20 -11 11 -20 25 -20 30 0 6 9 19 20 30 18 18 33 20 170 20 171 0 161 -7 135 95 -34 128 -117 243 -232 317 l-65 43 5 50 c13 122 81 226 180 274 42 20 58 23 120 18 40 -3 81 -7 92 -9 14 -2 21 3 23 19 3 19 -5 24 -49 37 -66 20 -102 20 -165 1 -68 -20 -140 -69 -180 -124 -39 -54 -74 -149 -74 -204 l0 -39 -52 9 c-67 10 -201 10 -253 0 l-41 -8 -11 63 c-15 88 -49 154 -110 216 -88 89 -205 121 -307 85z"/><path d="M1787 2982 c-13 -14 -17 -39 -17 -110 0 -87 1 -92 25 -108 l25 -16 0 -347 c0 -365 5 -410 50 -515 58 -137 181 -267 319 -340 72 -38 197 -76 248 -76 l33 0 0 -273 0 -274 -132 -7 c-198 -9 -394 -35 -468 -59 -56 -19 -65 -25 -65 -46 0 -30 41 -45 170 -66 251 -40 825 -45 1095 -11 142 18 260 50 260 70 0 35 -79 66 -220 85 -99 14 -317 31 -396 31 l-64 0 0 274 0 273 55 7 c290 34 541 271 594 560 7 35 11 196 11 390 0 320 1 332 20 344 18 11 20 23 20 112 0 114 -4 120 -85 120 -81 0 -85 -6 -85 -120 0 -89 2 -101 20 -112 19 -12 20 -23 20 -333 -1 -358 -9 -433 -58 -536 -67 -140 -194 -253 -342 -305 -100 -34 -323 -45 -440 -20 -221 46 -400 216 -455 431 -12 47 -15 128 -15 407 0 320 1 348 18 357 14 8 17 24 17 104 0 117 -6 127 -85 127 -42 0 -61 -5 -73 -18z"/><path d="M2030 2600 c0 -318 1 -345 21 -403 40 -121 116 -218 223 -286 166 -104 344 -115 523 -31 81 37 190 140 231 218 59 112 62 133 62 504 l0 338 -530 0 -530 0 0 -340z"/><path d="M1802 712 c3 -36 5 -38 70 -59 132 -44 282 -57 673 -58 362 0 492 8 655 41 108 23 130 36 130 80 0 31 -3 35 -17 29 -142 -59 -595 -94 -958 -75 -240 12 -409 32 -496 60 l-60 18 3 -36z"/></g></svg>
-    </div>
-    <div class="app-name" id="s0-title">欢迎使用</div>
-    <div class="app-brand" id="s0-brand">虾BB</div>
-    <div class="app-desc" id="s0-desc">by Vibe Coders, for Vibe Coders</div>
-    <div style="height:20px"></div>
+    <div id="logoArea" class="app-icon app-icon-lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="#000000"><g transform="translate(0,512) scale(0.1,-0.1)" stroke="none"><path d="M1966 4593 c-52 -19 -61 -29 -47 -51 6 -11 16 -11 47 -3 179 50 341 -76 368 -284 l6 -50 -53 -29 c-123 -70 -241 -239 -254 -369 l-6 -57 150 0 c133 0 152 -2 166 -18 21 -23 22 -46 2 -66 -12 -12 -43 -15 -153 -15 -75 1 -143 0 -149 0 -8 -1 -13 -17 -13 -46 l0 -44 156 -3 c134 -3 158 -5 167 -20 8 -12 8 -24 -1 -42 l-12 -26 -155 0 -155 0 0 -45 0 -45 153 0 c161 0 177 -4 177 -45 0 -41 -16 -45 -177 -45 l-153 0 0 -45 0 -45 153 0 c161 0 177 -4 177 -45 0 -41 -16 -45 -177 -45 l-153 0 0 -40 0 -40 83 -1 c268 -4 973 4 980 11 5 4 7 20 5 36 l-3 29 -158 5 c-125 4 -160 8 -167 20 -13 20 -12 33 3 53 10 14 36 17 167 19 l155 3 0 40 0 40 -155 3 c-131 2 -157 5 -167 19 -17 22 -16 38 3 57 13 13 42 16 165 16 l149 0 6 24 c3 14 3 34 -1 45 -6 20 -13 21 -155 21 -147 0 -150 0 -165 24 -13 19 -14 29 -5 45 10 20 19 21 165 21 l155 0 0 45 0 45 -145 0 c-132 0 -147 2 -165 20 -11 11 -20 25 -20 30 0 6 9 19 20 30 18 18 33 20 170 20 171 0 161 -7 135 95 -34 128 -117 243 -232 317 l-65 43 5 50 c13 122 81 226 180 274 42 20 58 23 120 18 40 -3 81 -7 92 -9 14 -2 21 3 23 19 3 19 -5 24 -49 37 -66 20 -102 20 -165 1 -68 -20 -140 -69 -180 -124 -39 -54 -74 -149 -74 -204 l0 -39 -52 9 c-67 10 -201 10 -253 0 l-41 -8 -11 63 c-15 88 -49 154 -110 216 -88 89 -205 121 -307 85z"/><path d="M1787 2982 c-13 -14 -17 -39 -17 -110 0 -87 1 -92 25 -108 l25 -16 0 -347 c0 -365 5 -410 50 -515 58 -137 181 -267 319 -340 72 -38 197 -76 248 -76 l33 0 0 -273 0 -274 -132 -7 c-198 -9 -394 -35 -468 -59 -56 -19 -65 -25 -65 -46 0 -30 41 -45 170 -66 251 -40 825 -45 1095 -11 142 18 260 50 260 70 0 35 -79 66 -220 85 -99 14 -317 31 -396 31 l-64 0 0 274 0 273 55 7 c290 34 541 271 594 560 7 35 11 196 11 390 0 320 1 332 20 344 18 11 20 23 20 112 0 114 -4 120 -85 120 -81 0 -85 -6 -85 -120 0 -89 2 -101 20 -112 19 -12 20 -23 20 -333 -1 -358 -9 -433 -58 -536 -67 -140 -194 -253 -342 -305 -100 -34 -323 -45 -440 -20 -221 46 -400 216 -455 431 -12 47 -15 128 -15 407 0 320 1 348 18 357 14 8 17 24 17 104 0 117 -6 127 -85 127 -42 0 -61 -5 -73 -18z"/><path d="M2030 2600 c0 -318 1 -345 21 -403 40 -121 116 -218 223 -286 166 -104 344 -115 523 -31 81 37 190 140 231 218 59 112 62 133 62 504 l0 338 -530 0 -530 0 0 -340z"/><path d="M1802 712 c3 -36 5 -38 70 -59 132 -44 282 -57 673 -58 362 0 492 8 655 41 108 23 130 36 130 80 0 31 -3 35 -17 29 -142 -59 -595 -94 -958 -75 -240 12 -409 32 -496 60 l-60 18 3 -36z"/></g></svg></div>
+    <div class="app-name" id="s0-title">欢迎使用虾BB</div>
+    <div class="app-desc" id="s0-desc">专为 Vibe Coder 打造的语音输入。中英混说，Claude、OpenClaw、GitHub 精准识别。免费，开源，280KB。</div>
+    <div style="height:28px"></div>
     <button class="btn btn-primary btn-large bounce-in" onclick="startSetup()" id="s0-btn">开始设置</button>
-    <div style="height:12px"></div>
+    <div style="height:16px"></div>
     <div class="hint" id="s0-hint">设置只需 2 分钟</div>
   </div>
 </div>
@@ -1387,15 +1279,15 @@ private let onboardingHTML = """
     <p id="s4-desc" style="margin-bottom:20px;">其他语音工具会把 "Claude" 识别成 "cloud"，把 "OpenClaw" 识别成 "open cloud"。虾BB 不会。</p>
     <!-- Feature cards instead of raw word list -->
     <div style="display:flex; flex-direction:column; gap:14px;">
-      <div style="background:#f9fafb; border-radius:255px 15px 225px 15px / 15px 225px 15px 255px; padding:16px 20px; border:2px solid #e5e7eb; transform:rotate(-0.5deg);">
+      <div style="background:#f9fafb; border-radius:12px; padding:16px 18px; border:1px solid #f3f4f6;">
         <div style="font-size:15px; font-weight:600; color:#1f2937; margin-bottom:4px;">🤖 40+ AI 工具词汇预置</div>
         <div style="font-size:13px; color:#6b7280; line-height:1.6;">Claude、OpenClaw、Cursor、Gemini、Kimi、DeepSeek、ChatGPT 等 AI 工具名称都能被精确识别，不再张冠李戴。</div>
       </div>
-      <div style="background:#f9fafb; border-radius:255px 15px 225px 15px / 15px 225px 15px 255px; padding:16px 20px; border:2px solid #e5e7eb; transform:rotate(-0.5deg);">
+      <div style="background:#f9fafb; border-radius:12px; padding:16px 18px; border:1px solid #f3f4f6;">
         <div style="font-size:15px; font-weight:600; color:#1f2937; margin-bottom:4px;">💻 开发者常用英文术语</div>
         <div style="font-size:13px; color:#6b7280; line-height:1.6;">API、async、frontend、pull request、code review —— Vibe Coding 中常说的英文术语都在词库里。</div>
       </div>
-      <div style="background:#f9fafb; border-radius:255px 15px 225px 15px / 15px 225px 15px 255px; padding:16px 20px; border:2px solid #e5e7eb; transform:rotate(-0.5deg);">
+      <div style="background:#f9fafb; border-radius:12px; padding:16px 18px; border:1px solid #f3f4f6;">
         <div style="font-size:15px; font-weight:600; color:#1f2937; margin-bottom:4px;">✏️ 支持自定义扩展</div>
         <div style="font-size:13px; color:#6b7280; line-height:1.6;" id="s4-dict-note">你可以随时在菜单栏添加自己的专属词汇 —— 公司名、项目名、同事英文名，说什么识别什么。</div>
       </div>
@@ -1420,8 +1312,8 @@ private let onboardingHTML = """
       <h2 id="s5-title" style="margin:0 0 6px; font-size:22px;">试试看</h2>
       <p id="s5-instruction" style="margin:0 0 12px; font-size:14px; color:var(--gray-500);">按住 Globe 键，念出下面这句话：</p>
       <!-- Quote card -->
-      <div style="border-left:3px solid var(--accent); background:var(--accent-light); border-radius:0 10px 10px 0; padding:12px 14px; margin-bottom:14px;">
-        <div style="font-size:13px; color:var(--accent-dark); font-weight:500; line-height:1.8; font-style:italic;" id="s5-sample-sentence">"无论是用 Claude Code 还是 OpenClaw，都能够成为一个出色的 Vibe Coder，享受 AI Agent 时代的无限自由。"</div>
+      <div style="border-left:3px solid var(--blue); background:var(--blue-light); border-radius:0 10px 10px 0; padding:12px 14px; margin-bottom:14px;">
+        <div style="font-size:13px; color:var(--blue-dark); font-weight:500; line-height:1.8; font-style:italic;" id="s5-sample-sentence">"无论是用 Claude Code 还是 OpenClaw，都能够成为一个出色的 Vibe Coder，享受 AI Agent 时代的无限自由。"</div>
       </div>
       <!-- Mic hint -->
       <div style="background:#f3f4f6; border-radius:8px; padding:8px 12px; margin-bottom:14px; display:flex; align-items:flex-start; gap:8px;">
@@ -1449,7 +1341,7 @@ private let onboardingHTML = """
           <span style="margin-left:6px; font-size:12px; color:#6b7280; font-weight:500;">虾BB</span>
         </div>
         <div class="mock-body" id="s5-mock-text" style="flex:1; overflow-y:auto;">
-          <span id="s5-mock-placeholder" style="color:#928374; font-style:italic;">你的语音会出现在这里...</span>
+          <span id="s5-mock-placeholder" style="color:#9ca3af; font-style:italic;">你的语音会出现在这里...</span>
         </div>
       </div>
     </div>
@@ -1457,7 +1349,7 @@ private let onboardingHTML = """
   <div class="step-nav" id="s5-nav" style="padding-top:8px;">
     <button class="btn btn-ghost" onclick="goBack()" id="nav-back-4">返回</button>
     <div style="display:flex; gap:10px;">
-      <button class="btn btn-ghost" onclick="goNext()" id="s5-skip-btn" style="font-size:13px; color:#928374;">跳过</button>
+      <button class="btn btn-ghost" onclick="goNext()" id="s5-skip-btn" style="font-size:13px; color:#9ca3af;">跳过</button>
       <button class="btn btn-primary" onclick="goNext()" id="s5-start-btn" disabled style="opacity:0.4; cursor:not-allowed;">下一步</button>
     </div>
   </div>
@@ -1472,7 +1364,7 @@ var barLevels = new Array(12).fill(0);
 
 var S = {
   zh: {
-    s0_title:'欢迎使用', s0_desc:'by Vibe Coders, for Vibe Coders',
+    s0_title:'欢迎使用虾BB', s0_desc:'专为 Vibe Coding 打造的语音输入法',
     s0_btn:'开始设置', s0_hint:'设置只需 2 分钟',
     s1_title:'配置 API Key', s1_desc:'虾BB 使用 Google Gemini 进行语音识别。免费额度：每天 250 次，无需信用卡。',
     s1_hint:'免费版每天 250 次请求', s1_placeholder:'粘贴 API Key...',
@@ -1487,7 +1379,7 @@ var S = {
     s4_title:'📖 智能词汇表', s4_desc:'虾BB 预置了 Vibe Coding 常用词汇，确保精准识别：',
     s4_dict_note:'你可以随时在菜单栏 → 自定义词汇表中添加更多词汇。',
     s5_title:'试试看', s5_instruction:'按住 Globe 键，念出下面这句话：',
-    s5_sample:'"无论是用 Claude Code 还是 OpenClaw，都能够成为一个出色的 Vibe Coder。"',
+    s5_sample:'"无论是用 Claude Code 还是 OpenClaw，都能够成为一个出色的 Vibe Coder，享受 AI Agent 时代的无限自由。"',
     s5_press_hint:'按住 Globe 键开始说话，松开后文字会出现在右边',
     s5_done_note:'注意到了吗？Claude Code、OpenClaw、Vibe Coder 都被精确识别了。',
     s5_start:'开始使用虾BB',
@@ -1501,7 +1393,7 @@ var S = {
     back:'返回', next:'下一步', key_missing:'请输入 Key'
   },
   en: {
-    s0_title:'Welcome to', s0_desc:'by Vibe Coders, for Vibe Coders',
+    s0_title:'Welcome to XiaBB', s0_desc:'Voice-to-text built for Vibe Coding',
     s0_btn:'Get Started', s0_hint:'Setup takes about 2 minutes',
     s1_title:'Gemini API Key', s1_desc:'XiaBB uses Google Gemini for transcription. Free tier: 250 requests/day, no credit card.',
     s1_hint:'Free tier: 250 requests per day', s1_placeholder:'Paste API Key...',
@@ -1516,7 +1408,7 @@ var S = {
     s4_title:'📖 Smart Dictionary', s4_desc:'XiaBB includes preset Vibe Coding vocabulary for accurate recognition:',
     s4_dict_note:'You can add more words anytime via menu bar → Custom Dictionary.',
     s5_title:'Try It Out', s5_instruction:'Hold Globe key and read the sentence below:',
-    s5_sample:'"Whether using Claude Code or OpenClaw, you can become an outstanding Vibe Coder."',
+    s5_sample:'"Whether using Claude Code or OpenClaw, you can become an outstanding Vibe Coder and enjoy the boundless freedom of the AI Agent era."',
     s5_press_hint:'Hold Globe key to start speaking — text will appear on the right when done',
     s5_done_note:'Notice how Claude Code, OpenClaw, Vibe Coder were all perfectly recognized.',
     s5_start:'Start Using XiaBB',
@@ -1643,7 +1535,7 @@ function doValidate() {
   }
   setDisabled('validateBtn', true);
   setText('validateBtn', t('s1_validating'));
-  setKeyStatus('', t('s1_validating'), 'var(--accent-dark)', true);
+  setKeyStatus('', t('s1_validating'), 'var(--blue-dark)', true);
   window.webkit && window.webkit.messageHandlers.xiabb.postMessage({action:'validateKey', key:key});
 }
 function onKeyValidated(ok, msg) {
@@ -1761,7 +1653,7 @@ function onGlobeKeyDown() {
   if (!globeDetectedOnce) {
     globeDetectedOnce = true;
     var lbl = document.getElementById('s3-detected-label');
-    if (lbl) { lbl.textContent = '✅ ' + t('s3_detected'); lbl.style.color = 'var(--accent)'; lbl.style.fontWeight = '500'; }
+    if (lbl) { lbl.textContent = '✅ ' + t('s3_detected'); lbl.style.color = 'var(--blue)'; lbl.style.fontWeight = '500'; }
   }
   // Step 5: update status indicator to "recording"
   if (currentStep === 5) {
@@ -1838,6 +1730,13 @@ function doFinish() {
 }
 
 function updateChecklist(hasKey, micOK, accOK) {
+  function setItem(iconId, labelId, statusId, ok, okLabel, noLabel) {
+    setText(iconId, ok ? '✅' : '⚠️');
+    setText(labelId, ok ? okLabel : noLabel);
+    var st = document.getElementById(statusId);
+    if (st) { st.textContent = ok ? t(okLabel.replace ? okLabel : okLabel) : noLabel; st.style.color = ok ? 'var(--green)' : 'var(--gray-400)'; }
+  }
+  // simpler: just set text directly
   setText('chk-key-icon', hasKey ? '✅' : '⚠️');
   setText('chk-key-status', hasKey ? t('chk_key_ok') : t('chk_key_no'));
   var ks = document.getElementById('chk-key-status');
@@ -2068,10 +1967,6 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
     private func startMicTest() {
         guard !micTestActive else { return }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        guard hasPhysicalAudioInput() else {
-            log("[onboarding] No mic for mic test, skipping")
-            return
-        }
         stopMicTest()
         micTestActive = true
 
@@ -2344,26 +2239,6 @@ class HUDOverlay {
         copyBtn.frame = NSRect(x: w - 36, y: (h - 20) / 2, width: 28, height: 20)
     }
 
-    /// Position HUD near the mouse cursor (above it) so it's always visible where you're working
-    func moveToMouse() {
-        let mouse = NSEvent.mouseLocation  // screen coords, origin bottom-left
-        let hudW = window.frame.width
-        let hudH = window.frame.height
-        let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-
-        // Place HUD centered above the mouse, 40px up
-        var x = mouse.x - hudW / 2
-        var y = mouse.y + 40
-
-        // Keep on screen
-        if x < screen.minX + 8 { x = screen.minX + 8 }
-        if x + hudW > screen.maxX - 8 { x = screen.maxX - hudW - 8 }
-        if y + hudH > screen.maxY - 8 { y = mouse.y - hudH - 20 }  // flip below if too high
-        if y < screen.minY + 8 { y = screen.minY + 8 }
-
-        window.setFrameOrigin(NSPoint(x: x, y: y))
-    }
-
     func show(text: String) {
         DispatchQueue.main.async { [self] in
             resultText = ""
@@ -2378,7 +2253,6 @@ class HUDOverlay {
             copyBtn.isHidden = true
             hudIcon.contentTintColor = rc
             window.alphaValue = 1.0
-            moveToMouse()
             window.orderFrontRegardless()
             isPulsing = true
             pulsePhase = 0
@@ -2795,8 +2669,8 @@ class XiaBBApp: NSObject {
         let fnNow = (event.flags.rawValue & FN_FLAG) != 0
         if fnNow && !fnHeld {
             fnHeld = true
-            // Serialize on audio queue to prevent concurrent AVAudioEngine access
-            recorder.audioQueue.async { [weak self] in
+            // Always start recording
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
                 log("🌐 Globe DOWN")
                 self?.startRecording()
             }
@@ -2808,8 +2682,8 @@ class XiaBBApp: NSObject {
             }
         } else if !fnNow && fnHeld {
             fnHeld = false
-            // Serialize on audio queue to prevent concurrent AVAudioEngine access
-            recorder.audioQueue.async { [weak self] in
+            // Always stop recording
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
                 log("🌐 Globe UP")
                 self?.stopRecording()
             }
@@ -2831,24 +2705,10 @@ class XiaBBApp: NSObject {
 
         playSound(sfxStart())
 
-        DispatchQueue.main.async { [weak self] in
-            self?.hud.show(text: L("listening"))
-        }
+        let remaining = usage.remaining
+        hud.show(text: L("listening"))
 
         recorder.start()
-
-        // If start() failed (no mic), show error and bail
-        guard recorder.isRecording else {
-            log("⚠️ Recording did not start (no mic?)")
-            DispatchQueue.main.async { [weak self] in
-                self?.hud.show(text: "🎤 No microphone detected")
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.hud.hide()
-            }
-            return
-        }
-
         lastSentChunk = 0
 
         // Start live session for real-time preview
@@ -2874,11 +2734,7 @@ class XiaBBApp: NSObject {
                 guard let self = self, self.recorder.isRecording else { return }
                 // Save text from current session before reconnecting
                 if let currentSession = self.liveSession {
-                    let sessionText = currentSession.currentText
-                    if !sessionText.isEmpty && !self.liveAccumulatedText.isEmpty {
-                        self.liveAccumulatedText += " "
-                    }
-                    self.liveAccumulatedText += sessionText
+                    self.liveAccumulatedText = self.liveAccumulatedText + currentSession.currentText
                     log("[live] 🔄 Reconnecting (15s). Accumulated: \(self.liveAccumulatedText.count) chars")
                     currentSession.stop()
                 }
@@ -2920,31 +2776,27 @@ class XiaBBApp: NSObject {
         // Ignore accidental taps (< minRecordingDuration, default 2.0s)
         if duration < minRecordingDuration {
             log("  ⏭ Too short (\(String(format: "%.2f", duration))s < \(minRecordingDuration)s) — discarded")
-            DispatchQueue.main.async { [weak self] in self?.hud.hide() }
+            hud.hide()
             return
         }
 
         playSound(sfxStop())
 
         isTranscribing = true
-        DispatchQueue.main.async { [weak self] in
-            self?.hud.isProcessing = true  // switch wave direction
-            self?.hud.updateText(L("finalizing"))
-        }
+        hud.isProcessing = true  // switch wave direction
+        hud.updateText(L("finalizing"))
 
         guard !frames.isEmpty else {
             log("  No audio frames captured")
             isTranscribing = false
-            DispatchQueue.main.async { [weak self] in self?.hud.hide() }
+            hud.hide()
             return
         }
 
         guard usage.remaining > 0 else {
             isTranscribing = false
             playSound(sfxError())
-            DispatchQueue.main.async { [weak self] in
-                self?.hud.showResult("\(L("daily_limit")) (\(DAILY_FREE_LIMIT))", isError: true)
-            }
+            hud.showResult("\(L("daily_limit")) (\(DAILY_FREE_LIMIT))", isError: true)
             return
         }
 
@@ -2959,17 +2811,16 @@ class XiaBBApp: NSObject {
                 let count = usage.increment()
                 log("✅ [\(count)/\(DAILY_FREE_LIMIT)] \(text)")
                 playSound(sfxDone())
-                DispatchQueue.main.async { [weak self] in
-                    self?.hud.showResult(text)
-                }
+                self.hud.showResult(text)
                 self.lastTranscription = text
                 if self.isOnboarding {
+                    let escapedText = text
+                        .replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "'", with: "\\'")
+                        .replacingOccurrences(of: "\n", with: "\\n")
+                        .replacingOccurrences(of: "\r", with: "")
                     DispatchQueue.main.async { [weak self] in
-                        self?.onboardingWindow.webView?.callAsyncJavaScript(
-                            "onTranscriptionResult(text)",
-                            arguments: ["text": text],
-                            in: nil, in: .page, completionHandler: nil
-                        )
+                        self?.onboardingWindow.webView?.evaluateJavaScript("onTranscriptionResult('\(escapedText)')", completionHandler: nil)
                     }
                 }
                 // Always copy and paste, even during onboarding
@@ -2977,9 +2828,7 @@ class XiaBBApp: NSObject {
             case .failure(let error):
                 log("❌ Transcription error: \(error.localizedDescription)")
                 playSound(sfxError())
-                DispatchQueue.main.async { [weak self] in
-                    self?.hud.showResult(error.localizedDescription, isError: true)
-                }
+                self.hud.showResult(error.localizedDescription, isError: true)
             }
         }
     }
@@ -3022,11 +2871,11 @@ class XiaBBApp: NSObject {
 
     @objc func toggleRecording() {
         if recorder.isRecording {
-            recorder.audioQueue.async { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.stopRecording()
             }
         } else {
-            recorder.audioQueue.async { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.startRecording()
             }
         }
@@ -3040,37 +2889,36 @@ class XiaBBApp: NSObject {
     }
 
     @objc func editDictionary() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let words = loadDictionary()
-            let current = words.joined(separator: ", ")
-            let prompt = currentLang == "zh"
-                ? "编辑自定义词汇表（逗号分隔）\\n\\n这些词会被精确识别，不会被替换成发音相似的词。\\n例如：Claude 不会被识别成 cloud"
-                : "Edit custom dictionary (comma-separated)\\n\\nThese words will be transcribed exactly as written.\\nExample: Claude won't be misheard as cloud"
-            let script = """
-            tell application "System Events"
-              display dialog "\(prompt)" default answer "\(current)" with title "虾BB Dictionary" buttons {"Cancel", "Save"} default button "Save"
-              set theWords to text returned of result
-              return theWords
-            end tell
-            """
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            proc.arguments = ["-e", script]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = Pipe()
-            try? proc.run()
-            proc.waitUntilExit()
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if proc.terminationStatus == 0 && !output.isEmpty {
-                let newWords = output.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                saveDictionary(newWords)
-                log("📖 Dictionary updated: \(newWords.count) words")
-                let p2 = Process()
-                p2.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                p2.arguments = ["-e", "tell application \"System Events\" to display notification \"词汇表已保存 ✅ (\(newWords.count) 个词)\" with title \"虾BB\""]
-                try? p2.run()
-            }
+        let words = loadDictionary()
+        let current = words.joined(separator: ", ")
+        let prompt = currentLang == "zh"
+            ? "编辑自定义词汇表（逗号分隔）\\n\\n这些词会被精确识别，不会被替换成发音相似的词。\\n例如：Claude 不会被识别成 cloud"
+            : "Edit custom dictionary (comma-separated)\\n\\nThese words will be transcribed exactly as written.\\nExample: Claude won't be misheard as cloud"
+        let script = """
+        tell application "System Events"
+          display dialog "\(prompt)" default answer "\(current)" with title "虾BB Dictionary" buttons {"Cancel", "Save"} default button "Save"
+          set theWords to text returned of result
+          return theWords
+        end tell
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        try? proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if proc.terminationStatus == 0 && !output.isEmpty {
+            let newWords = output.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            saveDictionary(newWords)
+            log("📖 Dictionary updated: \(newWords.count) words")
+            // Show confirmation
+            let p2 = Process()
+            p2.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p2.arguments = ["-e", "tell application \"System Events\" to display notification \"词汇表已保存 ✅ (\(newWords.count) 个词)\" with title \"虾BB\""]
+            try? p2.run()
         }
     }
 
