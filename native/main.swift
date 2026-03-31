@@ -2020,7 +2020,7 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
     private func validateAPIKey(_ key: String) {
         guard !key.isEmpty else {
             let msg = currentLang == "zh" ? "请输入 Key" : "Please enter a key"
-            webView?.evaluateJavaScript("onKeyValidated(false,'\(msg)')", completionHandler: nil)
+            webView?.callAsyncJavaScript("onKeyValidated(ok, msg)", arguments: ["ok": false, "msg": msg], in: nil, in: .page, completionHandler: nil)
             return
         }
 
@@ -2043,9 +2043,11 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
                 if error == nil && httpCode == 200 {
                     let keyFile = dataDir.appendingPathComponent(".api-key")
                     try? key.write(to: keyFile, atomically: true, encoding: .utf8)
+                    // Restrict file permissions to owner-only (600)
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
                     apiKey = key
                     let msg = currentLang == "zh" ? "Key 有效" : "Key is valid"
-                    self.webView?.evaluateJavaScript("onKeyValidated(true,'\(msg)')", completionHandler: nil)
+                    self.webView?.callAsyncJavaScript("onKeyValidated(ok, msg)", arguments: ["ok": true, "msg": msg], in: nil, in: .page, completionHandler: nil)
                     log("🔑 API key validated and saved via onboarding")
                 } else {
                     var msg = currentLang == "zh" ? "Key 无效，请检查后重试" : "Invalid key — check and try again"
@@ -2053,11 +2055,9 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let err = json["error"] as? [String: Any],
                        let errMsg = err["message"] as? String {
-                        // Remove single quotes to keep JS string safe
-                        let safe = errMsg.replacingOccurrences(of: "'", with: "").prefix(80)
-                        msg = String(safe)
+                        msg = String(errMsg.prefix(80))
                     }
-                    self.webView?.evaluateJavaScript("onKeyValidated(false,'\(msg)')", completionHandler: nil)
+                    self.webView?.callAsyncJavaScript("onKeyValidated(ok, msg)", arguments: ["ok": false, "msg": msg], in: nil, in: .page, completionHandler: nil)
                 }
             }
         }.resume()
@@ -3042,7 +3042,10 @@ class XiaBBApp: NSObject {
     @objc func editDictionary() {
         DispatchQueue.global(qos: .userInitiated).async {
             let words = loadDictionary()
+            // Escape for AppleScript string literal: backslashes then double-quotes
             let current = words.joined(separator: ", ")
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
             let prompt = currentLang == "zh"
                 ? "编辑自定义词汇表（逗号分隔）\\n\\n这些词会被精确识别，不会被替换成发音相似的词。\\n例如：Claude 不会被识别成 cloud"
                 : "Edit custom dictionary (comma-separated)\\n\\nThese words will be transcribed exactly as written.\\nExample: Claude won't be misheard as cloud"
@@ -3107,6 +3110,7 @@ class XiaBBApp: NSObject {
         if proc.terminationStatus == 0 && !output.isEmpty && output != currentDisplay {
             let keyFile = dataDir.appendingPathComponent(".api-key")
             try? output.write(to: keyFile, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
             apiKey = output
             log("🔑 API key saved")
             // Show confirmation
