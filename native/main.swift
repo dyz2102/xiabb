@@ -45,10 +45,75 @@ func log(_ msg: String) {
     }
 }
 
-// MARK: - Constants
+// MARK: - Feature Tier
 
+let isPro = false
+// MARK: - Branding
+
+#if CLAWBB
+let APP_NAME = "ClawBB"
+let APP_ID = "com.clawbb"
+let APP_EMOJI = "🦞"
+let APP_TAGLINE_ZH = "by Vibe Coders, for Vibe Coders"
+let APP_TAGLINE_EN = "by Vibe Coders, for Vibe Coders"
+#else
 let APP_NAME = "XiaBB"
 let APP_ID = "com.xiabb"
+let APP_EMOJI = "🦞"
+let APP_TAGLINE_ZH = "by Vibe Coders, for Vibe Coders"
+let APP_TAGLINE_EN = "by Vibe Coders, for Vibe Coders"
+#endif
+
+// MARK: - Smart Modes
+
+enum SmartMode: String {
+    case dictation = "dictation"  // Globe only — pure transcription
+    case translate = "translate"  // Globe+` — auto CN↔EN translation
+    case prompt = "prompt"        // Globe+1 — optimize as AI prompt
+    case email = "email"          // Globe+2 — polish as email
+}
+
+let SMART_MODE_PROMPTS: [SmartMode: String] = [
+    .dictation: "", // uses buildPrompt() as-is
+    .translate: """
+        Listen to this audio carefully and transcribe it. Then:
+        - If the speaker spoke primarily in Chinese, translate the ENTIRE output to English.
+        - If the speaker spoke primarily in English, translate the ENTIRE output to Simplified Chinese (简体中文).
+        - If mixed, determine the dominant language and translate everything to the OTHER language.
+        Output ONLY the translated text. Do NOT include the original language. Proper punctuation and natural phrasing.
+        """,
+    .prompt: """
+        Listen to this audio carefully. The speaker is casually describing what they want an AI to do. Your job is to transform their rough idea into a professional, detailed, production-quality prompt.
+
+        Rules:
+        1. NEVER invent details the speaker did not mention. Do NOT guess gender, clothing, objects, colors, or any specifics not stated. If the speaker said "a woman", it's a woman — never change it to a man. If they didn't mention clothing, don't add clothing.
+        2. ENRICH only along dimensions the speaker implied: add quality parameters (8k, detailed), lighting, composition, camera angle, art style — but ONLY when they don't contradict or fabricate subject details.
+        3. For IMAGE prompts: Improve technical quality (resolution, lighting, style keywords) but keep the EXACT subject description faithful to what was said. Never change who/what is in the image.
+        4. For CODE/WRITING prompts: Add structure (format, edge cases, acceptance criteria) but don't change the core task.
+        5. STRUCTURE the prompt with clear sections if complex (e.g. Role, Context, Task, Constraints, Output Format).
+        6. Remove filler words, hesitation, and repetition.
+        7. Output ONLY the final prompt. No meta-commentary, no explanation.
+        8. CRITICAL — Language: You MUST output in the SAME language the speaker used. Chinese input → Chinese output. English → English. Do NOT translate to another language.
+        """,
+    .email: """
+        Listen to this audio carefully. The speaker is describing what they want to communicate in an email.
+        Write a professional, polite, well-formatted email based on what they said. Include a subject line on the first line prefixed with "Subject: ".
+        Keep the tone appropriate — formal for business, friendly for colleagues. Fix grammar, add proper greetings and sign-off.
+        Output ONLY the email, nothing else.
+        If the speaker uses Chinese, write the email in Chinese. If English, in English. If mixed, use the dominant language.
+        """
+]
+
+func smartModeLabel(_ mode: SmartMode) -> String {
+    switch mode {
+    case .dictation: return ""
+    case .translate: return currentLang == "zh" ? "🔄 翻译模式" : "🔄 Translate"
+    case .prompt: return currentLang == "zh" ? "⚡ Prompt 模式" : "⚡ Prompt Mode"
+    case .email: return currentLang == "zh" ? "📧 邮件模式" : "📧 Email Mode"
+    }
+}
+
+// MARK: - Constants
 let SAMPLE_RATE: Double = 16000
 let CHANNELS: UInt32 = 1
 let DAILY_FREE_LIMIT = 250 // Gemini 2.5 Flash free tier: 250 RPD
@@ -112,7 +177,6 @@ func buildPrompt() -> String {
     let wordList = words.map { "\"\($0)\"" }.joined(separator: ", ")
     return BASE_PROMPT + "\n- IMPORTANT: The following words/names must be transcribed EXACTLY as specified (case-sensitive): \(wordList). Do NOT substitute similar-sounding words."
 }
-
 // MARK: - API Key
 
 func loadAPIKey() -> String {
@@ -240,6 +304,11 @@ let strings: [String: [String: String]] = [
         "language": "Language",
         "quit": "Quit XiaBB",
         "daily_limit": "Daily limit reached",
+        "update_available": "Update available",
+        "update_now": "Download Update",
+        "feedback": "Send Feedback",
+        "check_update": "Check for Updates...",
+        "up_to_date": "You're up to date!",
     ],
     "zh": [
         "idle": "待命",
@@ -257,6 +326,11 @@ let strings: [String: [String: String]] = [
         "language": "语言 / Language",
         "quit": "退出 虾BB",
         "daily_limit": "今日额度已用完",
+        "update_available": "有新版本可用",
+        "update_now": "下载更新",
+        "feedback": "反馈意见",
+        "check_update": "检查更新...",
+        "up_to_date": "已是最新版本!",
     ],
 ]
 
@@ -635,7 +709,7 @@ func encodeToWAV(frames: [Data]) -> (Data, Double) {
 
 // MARK: - Gemini REST API
 
-func transcribeREST(wavData: Data, completion: @escaping (Result<String, Error>) -> Void) {
+func transcribeREST(wavData: Data, mode: SmartMode = .dictation, completion: @escaping (Result<String, Error>) -> Void) {
     let b64 = wavData.base64EncodedString()
     guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(MODEL_REST):generateContent") else {
         completion(.failure(NSError(domain: "XiaBB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
@@ -648,12 +722,26 @@ func transcribeREST(wavData: Data, completion: @escaping (Result<String, Error>)
     request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
     request.timeoutInterval = 30
 
+    // Choose prompt based on smart mode, always include dictionary
+    let promptText: String
+    if mode == .dictation {
+        promptText = buildPrompt()
+    } else {
+        var base = SMART_MODE_PROMPTS[mode] ?? buildPrompt()
+        let words = loadDictionary()
+        if !words.isEmpty {
+            let wordList = words.map { "\"\($0)\"" }.joined(separator: ", ")
+            base += "\n- IMPORTANT: These proper nouns/terms must be kept EXACTLY as written (case-sensitive, do NOT translate or alter): \(wordList)."
+        }
+        promptText = base
+    }
+
     let body: [String: Any] = [
         "contents": [["parts": [
-            ["text": buildPrompt()],
+            ["text": promptText],
             ["inline_data": ["mime_type": "audio/wav", "data": b64]]
         ]]],
-        "generationConfig": ["temperature": 0.0, "maxOutputTokens": 4096]
+        "generationConfig": ["temperature": mode == .dictation ? 0.0 : 0.3, "maxOutputTokens": 4096]
     ]
 
     request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -2189,6 +2277,7 @@ class HUDOverlay {
     private var leftB: NSTextField!
     private var rightB: NSTextField!
     private var copyBtn: NSButton!
+    private var modeBadge: NSTextField!  // persistent mode indicator
     var resultText = ""
     private var hideTimer: Timer?
     private var pulsePhase: Double = 0
@@ -2289,7 +2378,20 @@ class HUDOverlay {
 
         dot = iconView
 
-        // Text label — starts after the brand area
+        // Mode badge — right-side emoji + text, no background color
+        modeBadge = NSTextField(labelWithString: "")
+        modeBadge.font = .systemFont(ofSize: 13)
+        modeBadge.alignment = .center
+        modeBadge.isBezeled = false
+        modeBadge.isEditable = false
+        modeBadge.isSelectable = false
+        modeBadge.backgroundColor = .clear
+        modeBadge.textColor = currentTheme.textColor
+        modeBadge.frame = NSRect(x: w - 80, y: (h - 20) / 2, width: 72, height: 20)
+        modeBadge.isHidden = true
+        cv.addSubview(modeBadge)
+
+        // Text label — always at same position, badge doesn't affect it
         label = NSTextField(labelWithString: "")
         label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 86, height: 20)
         label.textColor = currentTheme.textColor
@@ -2332,16 +2434,21 @@ class HUDOverlay {
     }
 
     private func resize(for text: String) {
-        let minW: CGFloat = 200, maxW: CGFloat = 700, h: CGFloat = 48
-        let w = min(maxW, max(minW, CGFloat(text.count) * 7.5 + 56))
+        let badgeExtra: CGFloat = modeBadge.isHidden ? 0 : 80
+        let minW: CGFloat = 200 + badgeExtra, maxW: CGFloat = 700, h: CGFloat = 48
+        let w = min(maxW, max(minW, CGFloat(text.count) * 7.5 + 56 + badgeExtra))
         let f = window.frame
         let cx = f.origin.x + f.width / 2
         let newX = cx - w / 2
         window.setFrame(NSRect(x: newX, y: f.origin.y, width: w, height: h), display: true)
         bg.frame = NSRect(x: 0, y: 0, width: w, height: h)
         bg.needsDisplay = true
-        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 86, height: 20)
-        copyBtn.frame = NSRect(x: w - 36, y: (h - 20) / 2, width: 28, height: 20)
+        let badgeSpace: CGFloat = modeBadge.isHidden ? 0 : 80
+        label.frame = NSRect(x: 52, y: (h - 20) / 2, width: w - 86 - badgeSpace, height: 20)
+        copyBtn.frame = NSRect(x: w - 36 - badgeSpace, y: (h - 20) / 2, width: 28, height: 20)
+        if !modeBadge.isHidden {
+            modeBadge.frame = NSRect(x: w - 80, y: (h - 20) / 2, width: 72, height: 20)
+        }
     }
 
     /// Position HUD near the mouse cursor (above it) so it's always visible where you're working
@@ -2369,6 +2476,8 @@ class HUDOverlay {
             resultText = ""
             hideTimer?.invalidate()
             hideTimer = nil
+            // Reset mode badge
+            modeBadge.isHidden = true
             resize(for: text)
             label.stringValue = text
             isProcessing = false
@@ -2382,6 +2491,28 @@ class HUDOverlay {
             window.orderFrontRegardless()
             isPulsing = true
             pulsePhase = 0
+        }
+    }
+
+    func setMode(_ mode: SmartMode) {
+        DispatchQueue.main.async { [self] in
+            if mode == .dictation {
+                modeBadge.isHidden = true
+            } else {
+                let isZH = currentLang == "zh"
+                let text: String
+                switch mode {
+                case .translate: text = isZH ? "🔄 翻译" : "🔄 Trans"
+                case .prompt: text = isZH ? "⚡ 提示词" : "⚡ Prompt"
+                case .email: text = isZH ? "📧 邮件" : "📧 Email"
+                case .dictation: text = ""
+                }
+                modeBadge.stringValue = text
+                modeBadge.isHidden = false
+                let w = window.frame.width
+                let h = window.frame.height
+                modeBadge.frame = NSRect(x: w - 80, y: (h - 20) / 2, width: 72, height: 20)
+            }
         }
     }
 
@@ -2407,6 +2538,7 @@ class HUDOverlay {
             label.stringValue = display
             isPulsing = false
             isProcessing = false
+            modeBadge.isHidden = true
             // Hide wave bars, show B B! for success (or hide for error)
             bars.forEach { $0.isHidden = true }
             if isError {
@@ -2506,6 +2638,7 @@ class XiaBBApp: NSObject {
     var lastTranscription = ""
     var liveSession: LiveSession?
     var hud: HUDOverlay!
+    var latestDMGUrl: String?
     var liveSendTimer: Timer?
     var liveReconnectTimer: Timer?
     var liveAccumulatedText = "" // carries text across reconnections
@@ -2515,6 +2648,7 @@ class XiaBBApp: NSObject {
     var idleTickCounter = 0
 
     var fnHeld = false
+    var activeMode: SmartMode = .dictation
     var recordingStartTime: Date?
     var minRecordingDuration: TimeInterval = {
         // Configurable via .config.json "min_duration", default 2.0s
@@ -2628,6 +2762,18 @@ class XiaBBApp: NSObject {
 
         menu.addItem(.separator())
 
+        let feedbackItem = NSMenuItem(title: L("feedback"), action: #selector(sendFeedback), keyEquivalent: "")
+        feedbackItem.target = self
+        menu.addItem(feedbackItem)
+        menuItems["feedback"] = feedbackItem
+
+        let updateItem = NSMenuItem(title: L("check_update"), action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
+        menuItems["update"] = updateItem
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: L("quit"), action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -2680,6 +2826,37 @@ class XiaBBApp: NSObject {
                 self?.onboardingWindow.show()
             }
         }
+
+        // Silent update check on launch (after 5s to not block startup)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.silentUpdateCheck()
+        }
+    }
+
+    private func silentUpdateCheck() {
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        let url = URL(string: "https://api.github.com/repos/dyz2102/xiabb/releases/latest")!
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            guard let self = self, self.isNewer(latest, than: current) else { return }
+            DispatchQueue.main.async {
+                self.menuItems["update"]?.title = "🔴 \(L("update_now")) (v\(latest))"
+                self.menuItems["update"]?.action = #selector(self.openUpdate)
+                if let assets = json["assets"] as? [[String: Any]],
+                   let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
+                   let dlUrl = dmg["browser_download_url"] as? String {
+                    self.latestDMGUrl = dlUrl
+                } else if let htmlUrl = json["html_url"] as? String {
+                    self.latestDMGUrl = htmlUrl
+                }
+                log("🔔 Update available: v\(latest) (current: v\(current))")
+            }
+        }.resume()
     }
 
     func loadIcon(name: String, template: Bool) -> NSImage? {
@@ -2743,27 +2920,37 @@ class XiaBBApp: NSObject {
     private var eventTap: CFMachPort?
 
     func setupEventTapCore() {
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
 
         XiaBBApp.shared = self
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
                 // tapDisabledByTimeout — re-enable IMMEDIATELY
                 if type == .tapDisabledByTimeout || type.rawValue == 0xFFFFFFFF {
                     if let tap = XiaBBApp.shared?.eventTap {
                         CGEvent.tapEnable(tap: tap, enable: true)
-                        // Log on background to keep callback fast
                         DispatchQueue.global().async { log("⚠️ Event tap re-enabled (was disabled by timeout)") }
                     }
                     return Unmanaged.passUnretained(event)
                 }
-                // Handle Globe key — dispatch immediately, no work in callback
-                XiaBBApp.shared?.handleFlagsChanged(event)
+                if type == .flagsChanged {
+                    XiaBBApp.shared?.handleFlagsChanged(event)
+                } else if type == .keyDown {
+                    // Swallow mode-switch keys (`, 1, 2) while Globe is held
+                    if let app = XiaBBApp.shared, app.fnHeld {
+                        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                        if keyCode == 50 || keyCode == 18 || keyCode == 19 || keyCode == 53 { // `, 1, 2, Esc
+                            app.handleKeyDown(event)
+                            return nil  // suppress — don't pass to app
+                        }
+                    }
+                    XiaBBApp.shared?.handleKeyDown(event)
+                }
                 return Unmanaged.passUnretained(event)
             },
             userInfo: nil
@@ -2790,11 +2977,65 @@ class XiaBBApp: NSObject {
 
     static var shared: XiaBBApp?
 
+    // Detect number keys (1/2) pressed while Globe is held — switch smart mode
+    func handleKeyDown(_ event: CGEvent) {
+        guard fnHeld else { return }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        // keyCode 50 = "`" (grave/backtick, left of 1), 18 = "1", 19 = "2"
+        switch keyCode {
+        case 50: // "`" key — toggle translate
+            let newMode: SmartMode = activeMode == .translate ? .dictation : .translate
+            activeMode = newMode
+            DispatchQueue.main.async { [weak self] in
+                log(newMode == .dictation ? "🎤 Back to dictation" : "🔄 Smart mode: translate")
+                self?.hud.setMode(newMode)
+            }
+        case 18: // "1" key — toggle prompt
+            let newMode: SmartMode = activeMode == .prompt ? .dictation : .prompt
+            activeMode = newMode
+            DispatchQueue.main.async { [weak self] in
+                log(newMode == .dictation ? "🎤 Back to dictation" : "⚡ Smart mode: prompt")
+                self?.hud.setMode(newMode)
+            }
+        case 19: // "2" key — toggle email
+            let newMode: SmartMode = activeMode == .email ? .dictation : .email
+            activeMode = newMode
+            DispatchQueue.main.async { [weak self] in
+                log(newMode == .dictation ? "🎤 Back to dictation" : "📧 Smart mode: email")
+                self?.hud.setMode(newMode)
+            }
+        case 53: // Esc key — cancel recording
+            log("⛔ Recording cancelled by Esc")
+            cancelRecording()
+        default:
+            break
+        }
+    }
+
+    func cancelRecording() {
+        guard recorder.isRecording else { return }
+        recorder.audioQueue.async { [weak self] in
+            _ = self?.recorder.stop()  // discard frames
+            self?.liveSession?.stop()
+            self?.liveSession = nil
+            self?.liveAccumulatedText = ""
+            DispatchQueue.main.async {
+                self?.liveSendTimer?.invalidate()
+                self?.liveSendTimer = nil
+                self?.liveReconnectTimer?.invalidate()
+                self?.liveReconnectTimer = nil
+                self?.hud.hide()
+            }
+        }
+        fnHeld = false  // reset so Globe UP doesn't trigger stopRecording
+    }
+
     // MUST be extremely fast — macOS disables the tap if callback is slow
     func handleFlagsChanged(_ event: CGEvent) {
         let fnNow = (event.flags.rawValue & FN_FLAG) != 0
         if fnNow && !fnHeld {
             fnHeld = true
+            activeMode = .dictation  // reset mode each press, number key changes it
             // Serialize on audio queue to prevent concurrent AVAudioEngine access
             recorder.audioQueue.async { [weak self] in
                 log("🌐 Globe DOWN")
@@ -2927,9 +3168,16 @@ class XiaBBApp: NSObject {
         playSound(sfxStop())
 
         isTranscribing = true
+        let finalizingLabel: String
+        switch activeMode {
+        case .dictation: finalizingLabel = L("finalizing")
+        case .translate: finalizingLabel = currentLang == "zh" ? "翻译中..." : "Translating..."
+        case .prompt: finalizingLabel = currentLang == "zh" ? "优化中..." : "Optimizing..."
+        case .email: finalizingLabel = currentLang == "zh" ? "生成邮件..." : "Composing..."
+        }
         DispatchQueue.main.async { [weak self] in
-            self?.hud.isProcessing = true  // switch wave direction
-            self?.hud.updateText(L("finalizing"))
+            self?.hud.isProcessing = true
+            self?.hud.updateText(finalizingLabel)
         }
 
         guard !frames.isEmpty else {
@@ -2951,7 +3199,12 @@ class XiaBBApp: NSObject {
         let (wavData, audioDuration) = encodeToWAV(frames: frames)
         log("  Audio: \(String(format: "%.1f", audioDuration))s, \(wavData.count) bytes, \(frames.count) chunks")
 
-        transcribeREST(wavData: wavData) { [weak self] result in
+        let mode = activeMode
+        if mode != .dictation {
+            log("🧠 Smart mode: \(mode.rawValue)")
+        }
+
+        transcribeREST(wavData: wavData, mode: mode) { [weak self] result in
             guard let self = self else { return }
             self.isTranscribing = false
             switch result {
@@ -2977,11 +3230,62 @@ class XiaBBApp: NSObject {
             case .failure(let error):
                 log("❌ Transcription error: \(error.localizedDescription)")
                 playSound(sfxError())
+                let msg = Self.friendlyError(error)
                 DispatchQueue.main.async { [weak self] in
-                    self?.hud.showResult(error.localizedDescription, isError: true)
+                    self?.hud.showResult(msg, isError: true)
                 }
             }
         }
+    }
+
+    static func friendlyError(_ error: Error) -> String {
+        let desc = error.localizedDescription.lowercased()
+        let nsErr = error as NSError
+        let zh = currentLang == "zh"
+
+        // Network unreachable / no internet
+        if nsErr.code == NSURLErrorNotConnectedToInternet
+            || nsErr.code == NSURLErrorNetworkConnectionLost
+            || desc.contains("network") && desc.contains("lost") {
+            return zh ? "⚠️ 无网络连接" : "⚠️ No network"
+        }
+        // DNS / hostname not found
+        if nsErr.code == NSURLErrorCannotFindHost
+            || desc.contains("hostname could not be found") {
+            return zh ? "⚠️ DNS解析失败" : "⚠️ DNS failed"
+        }
+        // Timeout
+        if nsErr.code == NSURLErrorTimedOut || desc.contains("timed out") {
+            return zh ? "⚠️ 请求超时" : "⚠️ Request timed out"
+        }
+        // SSL / certificate
+        if nsErr.code == NSURLErrorSecureConnectionFailed
+            || nsErr.code == NSURLErrorServerCertificateUntrusted
+            || desc.contains("ssl") || desc.contains("certificate") {
+            return zh ? "⚠️ SSL连接错误" : "⚠️ SSL error"
+        }
+        // API key invalid
+        if desc.contains("api key") || desc.contains("permission") || desc.contains("403") {
+            return zh ? "⚠️ API Key无效" : "⚠️ Invalid API Key"
+        }
+        // Rate limit
+        if desc.contains("rate") || desc.contains("429") || desc.contains("quota") {
+            return zh ? "⚠️ API限流，稍后重试" : "⚠️ Rate limited, retry later"
+        }
+        // Server error
+        if desc.contains("500") || desc.contains("503") || desc.contains("internal server") {
+            return zh ? "⚠️ Gemini服务故障" : "⚠️ Gemini server error"
+        }
+        // No speech
+        if desc.contains("no speech") || nsErr.code == -2 {
+            return zh ? "🤫 未检测到语音" : "🤫 No speech detected"
+        }
+        // Fallback — truncate to keep HUD readable
+        let short = error.localizedDescription
+        if short.count > 30 {
+            return "⚠️ " + String(short.prefix(28)) + "…"
+        }
+        return "⚠️ " + short
     }
 
     func copyAndPaste(_ text: String) {
@@ -3163,6 +3467,85 @@ class XiaBBApp: NSObject {
         onboardingWindow.show()
     }
 
+    @objc func sendFeedback() {
+        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let subject = "XiaBB Feedback (v\(ver))"
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let body = (currentLang == "zh"
+            ? "请在下方描述你的反馈:\n\n"
+            : "Please describe your feedback below:\n\n")
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let url = URL(string: "mailto:ZBOT6996@gmail.com?subject=\(subject)&body=\(body)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc func checkForUpdates() {
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        menuItems["update"]?.title = currentLang == "zh" ? "检查中..." : "Checking..."
+
+        let url = URL(string: "https://api.github.com/repos/dyz2102/xiabb/releases/latest")!
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if error != nil || data == nil {
+                    self.menuItems["update"]?.title = L("check_update")
+                    self.hud.show(text: "⚠️ " + (currentLang == "zh" ? "检查失败" : "Check failed"))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hud.hide() }
+                    return
+                }
+                guard let json = try? JSONSerialization.jsonObject(with: data!) as? [String: Any],
+                      let tag = json["tag_name"] as? String else {
+                    self.menuItems["update"]?.title = L("check_update")
+                    return
+                }
+                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                if self.isNewer(latest, than: current) {
+                    self.menuItems["update"]?.title = "🔴 \(L("update_now")) (v\(latest))"
+                    self.menuItems["update"]?.action = #selector(self.openUpdate)
+                    // Show in HUD
+                    self.hud.show(text: "\(L("update_available")): v\(latest)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        self.hud.hide()
+                    }
+                    // Store for one-click download
+                    if let assets = json["assets"] as? [[String: Any]],
+                       let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
+                       let dlUrl = dmg["browser_download_url"] as? String {
+                        self.latestDMGUrl = dlUrl
+                    } else if let htmlUrl = json["html_url"] as? String {
+                        self.latestDMGUrl = htmlUrl
+                    }
+                } else {
+                    self.menuItems["update"]?.title = L("check_update")
+                    self.hud.show(text: "✅ \(L("up_to_date")) (v\(current))")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hud.hide() }
+                }
+            }
+        }.resume()
+    }
+
+    private func isNewer(_ remote: String, than local: String) -> Bool {
+        let r = remote.split(separator: ".").compactMap { Int($0) }
+        let l = local.split(separator: ".").compactMap { Int($0) }
+        for i in 0..<max(r.count, l.count) {
+            let rv = i < r.count ? r[i] : 0
+            let lv = i < l.count ? l[i] : 0
+            if rv > lv { return true }
+            if rv < lv { return false }
+        }
+        return false
+    }
+
+    @objc func openUpdate() {
+        let urlStr = latestDMGUrl ?? "https://github.com/dyz2102/xiabb/releases/latest"
+        if let url = URL(string: urlStr) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc func quit() {
         NSApp.terminate(nil)
     }
@@ -3174,6 +3557,11 @@ class XiaBBApp: NSObject {
         menuItems["launch"]?.title = L("launch_login")
         menuItems["lang"]?.title = L("language")
         menuItems["quit"]?.title = L("quit")
+        menuItems["feedback"]?.title = L("feedback")
+        // Only reset update title if no update is pending
+        if menuItems["update"]?.action == #selector(checkForUpdates) {
+            menuItems["update"]?.title = L("check_update")
+        }
         menuItems["en"]?.state = currentLang == "en" ? .on : .off
         menuItems["zh"]?.state = currentLang == "zh" ? .on : .off
     }
