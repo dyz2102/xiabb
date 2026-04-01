@@ -2844,19 +2844,70 @@ class XiaBBApp: NSObject {
                   let tag = json["tag_name"] as? String else { return }
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             guard let self = self, self.isNewer(latest, than: current) else { return }
+
+            // Check if user skipped this version
+            let cfg = loadConfig()
+            if let skipped = cfg["skipped_version"] as? String, skipped == latest { return }
+
+            // Store DMG url
+            if let assets = json["assets"] as? [[String: Any]],
+               let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
+               let dlUrl = dmg["browser_download_url"] as? String {
+                self.latestDMGUrl = dlUrl
+            } else if let htmlUrl = json["html_url"] as? String {
+                self.latestDMGUrl = htmlUrl
+            }
+
+            // Parse release notes
+            let notes = json["body"] as? String ?? ""
+
             DispatchQueue.main.async {
                 self.menuItems["update"]?.title = "🔴 \(L("update_now")) (v\(latest))"
                 self.menuItems["update"]?.action = #selector(self.openUpdate)
-                if let assets = json["assets"] as? [[String: Any]],
-                   let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
-                   let dlUrl = dmg["browser_download_url"] as? String {
-                    self.latestDMGUrl = dlUrl
-                } else if let htmlUrl = json["html_url"] as? String {
-                    self.latestDMGUrl = htmlUrl
-                }
                 log("🔔 Update available: v\(latest) (current: v\(current))")
+                self.showUpdateAlert(current: current, latest: latest, notes: notes)
             }
         }.resume()
+    }
+
+    private func showUpdateAlert(current: String, latest: String, notes: String) {
+        let zh = currentLang == "zh"
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = zh
+            ? "🦞 虾BB 有新版本！"
+            : "🦞 XiaBB Update Available!"
+        alert.informativeText = zh
+            ? "当前版本: v\(current)\n最新版本: v\(latest)\n\n\(formatNotes(notes))"
+            : "Current: v\(current)\nLatest: v\(latest)\n\n\(formatNotes(notes))"
+
+        // Buttons: rightmost is index 1000, then 1001, 1002...
+        alert.addButton(withTitle: zh ? "下载更新" : "Download Update")
+        alert.addButton(withTitle: zh ? "稍后提醒" : "Remind Me Later")
+        alert.addButton(withTitle: zh ? "跳过此版本" : "Skip This Version")
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:  // Download
+            openUpdate()
+        case .alertThirdButtonReturn:  // Skip
+            var cfg = loadConfig()
+            cfg["skipped_version"] = latest
+            saveConfig(cfg)
+            log("⏭️ Skipped version v\(latest)")
+        default:  // Remind Later — do nothing, will check again next launch
+            break
+        }
+    }
+
+    private func formatNotes(_ notes: String) -> String {
+        // Extract a clean summary from markdown release notes
+        let lines = notes.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("---") && !$0.hasPrefix("macOS") }
+        let summary = lines.prefix(12).joined(separator: "\n")
+        if summary.isEmpty { return "" }
+        return summary
     }
 
     func loadIcon(name: String, template: Bool) -> NSImage? {
@@ -3492,8 +3543,12 @@ class XiaBBApp: NSObject {
                 guard let self = self else { return }
                 if error != nil || data == nil {
                     self.menuItems["update"]?.title = L("check_update")
-                    self.hud.show(text: "⚠️ " + (currentLang == "zh" ? "检查失败" : "Check failed"))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hud.hide() }
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = currentLang == "zh" ? "检查更新失败" : "Update Check Failed"
+                    alert.informativeText = currentLang == "zh" ? "无法连接到服务器，请检查网络连接。" : "Could not connect to server. Check your network."
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
                     return
                 }
                 guard let json = try? JSONSerialization.jsonObject(with: data!) as? [String: Any],
@@ -3503,14 +3558,7 @@ class XiaBBApp: NSObject {
                 }
                 let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
                 if self.isNewer(latest, than: current) {
-                    self.menuItems["update"]?.title = "🔴 \(L("update_now")) (v\(latest))"
-                    self.menuItems["update"]?.action = #selector(self.openUpdate)
-                    // Show in HUD
-                    self.hud.show(text: "\(L("update_available")): v\(latest)")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        self.hud.hide()
-                    }
-                    // Store for one-click download
+                    // Store DMG url
                     if let assets = json["assets"] as? [[String: Any]],
                        let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
                        let dlUrl = dmg["browser_download_url"] as? String {
@@ -3518,10 +3566,21 @@ class XiaBBApp: NSObject {
                     } else if let htmlUrl = json["html_url"] as? String {
                         self.latestDMGUrl = htmlUrl
                     }
+                    self.menuItems["update"]?.title = "🔴 \(L("update_now")) (v\(latest))"
+                    self.menuItems["update"]?.action = #selector(self.openUpdate)
+                    let notes = json["body"] as? String ?? ""
+                    // Manual check always shows alert (ignores skipped_version)
+                    self.showUpdateAlert(current: current, latest: latest, notes: notes)
                 } else {
                     self.menuItems["update"]?.title = L("check_update")
-                    self.hud.show(text: "✅ \(L("up_to_date")) (v\(current))")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hud.hide() }
+                    let alert = NSAlert()
+                    alert.alertStyle = .informational
+                    alert.messageText = currentLang == "zh" ? "✅ 已是最新版本" : "✅ You're Up to Date"
+                    alert.informativeText = currentLang == "zh"
+                        ? "当前版本 v\(current) 已是最新。"
+                        : "Version v\(current) is the latest."
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
                 }
             }
         }.resume()
