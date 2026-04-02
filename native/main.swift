@@ -2009,6 +2009,19 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
 
         wv.loadHTMLString(onboardingHTML, baseURL: nil)
 
+        // Ensure Edit menu exists for Cmd+C/V/X/A to work in WKWebView
+        if NSApp.mainMenu?.item(withTitle: "Edit") == nil {
+            let editMenu = NSMenu(title: "Edit")
+            editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+            editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+            editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+            editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+            let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+            editItem.submenu = editMenu
+            if NSApp.mainMenu == nil { NSApp.mainMenu = NSMenu() }
+            NSApp.mainMenu?.addItem(editItem)
+        }
+
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -2084,6 +2097,9 @@ class OnboardingWindow: NSObject, WKScriptMessageHandler {
     // MARK: - Init JS
 
     private func sendInitToJS(step: Int) {
+        // Re-read API key from file to ensure we have the latest
+        apiKey = loadAPIKey()
+
         let micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         let accGranted = AXIsProcessTrusted()
         let hasKey = !apiKey.isEmpty
